@@ -1,0 +1,59 @@
+{
+    "orders": [
+        {
+            "order_id": "O001",
+            "customer_id": "C001",
+            "order_date": "2023-03-15",
+            "total_amount": 150.50,
+            "status": "completed",
+            "items": 3,
+            "payment_method": "credit_card",
+            "shipping_address": "123 Main St, City, ST 12345",
+            "tracking_number": "TRK123456"
+        },
+        {
+            "order_id": "O002",
+            "customer_id": "C001",
+            "order_date": "2023-04-20",
+            "total_amount": 75.25,
+            "status": "completed",
+            "items": 2,
+            "payment_method": "paypal",
+            "shipping_address": "123 Main St, City, ST 12345",
+            "tracking_number": "TRK234567"
+        },
+        {
+            "order_id": "O003",
+            "customer_id": "C002",
+            "order_date": "2023-04-25",
+            "total_amount": 200.00,
+            "status": "processing",
+            "items": 4,
+            "payment_method": "credit_card",
+            "shipping_address": "456 Oak Ave, Town, ST 23456",
+            "tracking_number": "TRK345678"
+        },
+        {
+            "order_id": "O004",
+            "customer_id": "C003",
+            "order_date": "2023-05-01",
+            "total_amount": 300.75,
+            "status": "completed",
+            "items": 5,
+            "payment_method": "credit_card",
+            "shipping_address": "789 Pine Rd, Village, ST 34567",
+            "tracking_number": "TRK456789"
+        },
+        {
+            "order_id": "O005",
+            "customer_id": "C003",
+            "order_date": "2023-05-10",
+            "total_amount": 125.50,
+            "status": "cancelled",
+            "items": 2,
+            "payment_method": "paypal",
+            "shipping_address": "789 Pine Rd, Village, ST 34567",
+            "tracking_number": null
+        }
+    ]
+} 

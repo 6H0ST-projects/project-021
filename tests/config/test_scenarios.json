@@ -1,0 +1,162 @@
+{
+    "scenarios": [
+        {
+            "name": "customer_360_with_schema",
+            "description": "Generate customer 360 view with predefined schema",
+            "source": {
+                "type": "multi_source",
+                "sources": [
+                    {
+                        "name": "customers",
+                        "type": "json",
+                        "path": "tests/data/source/customers.json",
+                        "format": "json"
+                    },
+                    {
+                        "name": "orders",
+                        "type": "json",
+                        "path": "tests/data/source/orders.json",
+                        "format": "json"
+                    }
+                ],
+                "relationships": [
+                    {
+                        "from_table": "orders",
+                        "to_table": "customers",
+                        "type": "many_to_one",
+                        "keys": ["customer_id"]
+                    }
+                ]
+            },
+            "target": {
+                "name": "customer_360",
+                "type": "delta",
+                "path": "tests/data/target/customer_360",
+                "schema_path": "tests/data/target/customer_360_schema.json"
+            },
+            "tests": [
+                {
+                    "name": "schema_validation",
+                    "type": "schema_validation",
+                    "parameters": {
+                        "required_fields": [
+                            "customer_id",
+                            "name",
+                            "email",
+                            "profile.segment",
+                            "profile.status"
+                        ]
+                    }
+                },
+                {
+                    "name": "data_quality",
+                    "type": "data_quality",
+                    "preset": "strict",
+                    "parameters": {
+                        "null_threshold": 0.0,
+                        "unique_columns": ["customer_id", "email"]
+                    }
+                },
+                {
+                    "name": "business_rules",
+                    "type": "business_rules",
+                    "parameters": {
+                        "rules": [
+                            {
+                                "name": "valid_age",
+                                "condition": "profile.age >= 0 AND profile.age <= 120"
+                            },
+                            {
+                                "name": "valid_credit_score",
+                                "condition": "profile.credit_score >= 300 AND profile.credit_score <= 850"
+                            },
+                            {
+                                "name": "valid_metrics",
+                                "condition": "metrics.churn_risk >= 0.0 AND metrics.churn_risk <= 1.0"
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "customer_360_no_schema",
+            "description": "Generate customer 360 view with inferred schema",
+            "source": {
+                "type": "multi_source",
+                "sources": [
+                    {
+                        "name": "customers",
+                        "type": "json",
+                        "path": "tests/data/source/customers.json",
+                        "format": "json"
+                    },
+                    {
+                        "name": "orders",
+                        "type": "json",
+                        "path": "tests/data/source/orders.json",
+                        "format": "json"
+                    }
+                ],
+                "relationships": [
+                    {
+                        "from_table": "orders",
+                        "to_table": "customers",
+                        "type": "many_to_one",
+                        "keys": ["customer_id"]
+                    }
+                ]
+            },
+            "target": {
+                "name": "customer_360_inferred",
+                "type": "delta",
+                "path": "tests/data/target/customer_360_inferred"
+            },
+            "tests": [
+                {
+                    "name": "data_quality",
+                    "type": "data_quality",
+                    "preset": "standard",
+                    "parameters": {
+                        "null_threshold": 0.1,
+                        "unique_columns": ["customer_id"]
+                    }
+                },
+                {
+                    "name": "data_consistency",
+                    "type": "data_consistency",
+                    "parameters": {
+                        "checkpoints": [
+                            {
+                                "name": "customer_count",
+                                "source_query": "SELECT COUNT(*) FROM customers",
+                                "target_query": "SELECT COUNT(*) FROM customer_360_inferred",
+                                "expected": "equal"
+                            },
+                            {
+                                "name": "order_totals",
+                                "source_query": "SELECT SUM(total_amount) FROM orders",
+                                "target_query": "SELECT SUM(order_summary.total_spent) FROM customer_360_inferred",
+                                "expected": "equal"
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    ],
+    "test_data": {
+        "generation": {
+            "enabled": true,
+            "sample_size": 1000,
+            "seed": 42,
+            "output_dir": "tests/data/generated"
+        }
+    },
+    "reporting": {
+        "output_dir": "tests/results",
+        "formats": ["json", "html"],
+        "include_metrics": true,
+        "save_artifacts": true
+    }
+} 

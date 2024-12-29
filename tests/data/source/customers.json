@@ -1,0 +1,40 @@
+{
+    "customers": [
+        {
+            "customer_id": "C001",
+            "name": "John Smith",
+            "email": "john.smith@email.com",
+            "phone": "+1-555-123-4567",
+            "address": "123 Main St, City, ST 12345",
+            "registration_date": "2023-01-15",
+            "age": 35,
+            "status": "active",
+            "segment": "premium",
+            "credit_score": 720
+        },
+        {
+            "customer_id": "C002",
+            "name": "Jane Doe",
+            "email": "jane.doe@email.com",
+            "phone": "+1-555-234-5678",
+            "address": "456 Oak Ave, Town, ST 23456",
+            "registration_date": "2023-02-20",
+            "age": 28,
+            "status": "active",
+            "segment": "standard",
+            "credit_score": 680
+        },
+        {
+            "customer_id": "C003",
+            "name": "Bob Wilson",
+            "email": "bob.wilson@email.com",
+            "phone": "+1-555-345-6789",
+            "address": "789 Pine Rd, Village, ST 34567",
+            "registration_date": "2023-03-10",
+            "age": 42,
+            "status": "inactive",
+            "segment": "premium",
+            "credit_score": 750
+        }
+    ]
+} 
