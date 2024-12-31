@@ -48,7 +48,7 @@ class LLMCodeGenerator:
     
     def __init__(
         self,
-        model: str = "gpt-4-turbo-preview",
+        model: str = "gpt-4o",
         temperature: float = 0.2,
         max_tokens: int = 4000,
         max_retries: int = 3
@@ -81,6 +81,33 @@ class LLMCodeGenerator:
                 "4. Add type hints\n"
                 "5. Include logging\n"
                 "6. Follow PEP 8 style guidelines"
+            ))
+        ])
+        
+        # Create SQL-specific prompt template
+        self.sql_prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=(
+                "You are an expert data engineer specializing in writing performant SQL for large-scale data processing. "
+                "Your task is to generate high-performance SQL code that follows best practices for scalability. "
+                "Consider the following performance guidelines:\n"
+                "1. Minimize expensive operations (e.g., CROSS JOIN, correlated subqueries)\n"
+                "2. Use window functions instead of self-joins where possible\n"
+                "3. Optimize JOIN order and types (prefer INNER JOIN over LEFT JOIN when possible)\n"
+                "4. Leverage partitioning and clustering when available\n"
+                "5. Use appropriate indexing strategies\n"
+                "6. Consider data skew and implement appropriate handling\n"
+                "7. Implement efficient aggregations (e.g., pre-aggregate when possible)\n"
+                "8. Use CTEs for better readability and optimization\n"
+                "9. Implement proper error handling and NULL value management\n"
+                "10. Add clear comments explaining complex logic and performance considerations"
+            )),
+            MessagesPlaceholder(key="context"),
+            HumanMessage(content=(
+                "Task: {task}\n"
+                "Requirements: {requirements}\n"
+                "Constraints: {constraints}\n"
+                "Context: {context}\n\n"
+                "Generate performant SQL code that scales to large datasets."
             ))
         ])
         
@@ -403,6 +430,23 @@ class DataEngineeringAgent:
                 f"all(field in create_{layer}_layer(source_data).columns for field in {list(target_schema.keys())})" if target_schema else "True"
             ]
         }
+
+        # Add SQL-specific performance requirements for transformation layers
+        sql_performance_requirements = [
+            "Write performant SQL that scales to large datasets",
+            "Optimize JOIN operations and minimize expensive operations",
+            "Use window functions instead of self-joins where appropriate",
+            "Implement efficient aggregations and handle data skew",
+            "Leverage partitioning and clustering when available"
+        ]
+
+        sql_performance_constraints = [
+            "Avoid cross joins and correlated subqueries",
+            "Minimize shuffling and data movement",
+            "Consider column ordering for performance",
+            "Use appropriate indexing strategies",
+            "Handle NULL values efficiently"
+        ]
         
         request = CodeGenerationRequest(
             task=f"Generate {layer} layer transformation code",
@@ -417,18 +461,40 @@ class DataEngineeringAgent:
                 "Handle data type conversions",
                 "Apply business rules and transformations",
                 "Validate against target schema",
-                "Maintain data quality"
+                "Maintain data quality",
+                *sql_performance_requirements
             ],
             constraints=[
                 "Optimize for performance",
                 "Handle errors gracefully",
                 "Support incremental processing",
-                "Maintain data lineage"
+                "Maintain data lineage",
+                *sql_performance_constraints
             ]
         )
         
-        response = await self.code_generator.generate_code(request, execution_context)
-        return response.code
+        # Use SQL-specific prompt for transformation code generation
+        formatted_prompt = self.sql_prompt.format_messages(
+            task=request.task,
+            requirements=request.requirements,
+            constraints=request.constraints,
+            context=json.dumps(request.context, indent=2)
+        )
+        
+        # Get LLM response with SQL-specific prompt
+        response = await self.llm.ainvoke(formatted_prompt)
+        
+        # Extract code blocks and process as before
+        code_blocks = self._extract_code_blocks(response.content)
+        if not code_blocks:
+            raise ValueError("No code blocks found in response")
+        
+        return CodeGenerationResponse(
+            code=code_blocks[0],
+            explanation=response.content.split("```")[0].strip(),
+            imports=self._extract_imports(code_blocks[0]),
+            tests=code_blocks[1:] if len(code_blocks) > 1 else None
+        )
     
     async def generate_test_data(
         self,

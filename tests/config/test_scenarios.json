@@ -18,11 +18,28 @@
     "max_cpu_percent": 80,
     "timeout_seconds": 300,
     "llm_config": {
-        "model": "gpt-4-turbo-preview",
+        "model": "gpt-4o",
         "temperature": 0.2,
         "max_tokens": 4000,
         "max_retries": 3,
-        "cache_dir": "tests/cache/llm"
+        "cache_dir": "tests/cache/llm",
+        "performance_thresholds": {
+            "analyzer": {
+                "max_time_seconds": 30,
+                "max_tokens": 2000,
+                "max_retries": 2
+            },
+            "transformer": {
+                "max_time_seconds": 45,
+                "max_tokens": 3000,
+                "max_retries": 2
+            },
+            "tester": {
+                "max_time_seconds": 30,
+                "max_tokens": 2000,
+                "max_retries": 2
+            }
+        }
     },
     "scenarios": [
         {
@@ -37,6 +54,14 @@
                 "type": "delta",
                 "path": "tests/data/target/customer_360",
                 "schema_path": "tests/data/target/customer_360_schema.json"
+            },
+            "performance_thresholds": {
+                "total_time_seconds": 180,
+                "analyzer_time_seconds": 45,
+                "transformer_time_seconds": 60,
+                "test_time_seconds": 45,
+                "max_memory_mb": 2048,
+                "max_cpu_percent": 80
             },
             "tests": [
                 {

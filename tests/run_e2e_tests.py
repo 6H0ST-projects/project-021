@@ -7,11 +7,14 @@ import logging
 from pathlib import Path
 import asyncio
 from typing import Dict, Any, List
+import time
 
 from sidewinder.core.config import Source, Target
 from sidewinder.core.pipeline import Pipeline
 from sidewinder.testing.executor import run_tests_sync
 from sidewinder.testing.data_gen import generate_test_data
+from sidewinder.core.llm import DataEngineeringAgent, LLMCodeGenerator
+from sidewinder.testing.metrics import PerformanceMetrics
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -69,41 +72,128 @@ def generate_sample_data(config: Dict[str, Any], logger: logging.Logger):
     logger.info("Sample data generation complete")
 
 
-def run_scenario(
+async def run_llm_pipeline(
+    scenario: Dict[str, Any],
+    logger: logging.Logger,
+    metrics: PerformanceMetrics
+) -> Dict[str, Any]:
+    """Run LLM-based pipeline generation and execution."""
+    agent = DataEngineeringAgent()
+    source = Source(**scenario["source"])
+    target = Target(**scenario["target"])
+    
+    logger.info("Starting LLM code generation pipeline...")
+    
+    # Track LLM performance metrics
+    llm_metrics = {
+        "analyzer": {"time": 0, "tokens": 0},
+        "transformer": {"time": 0, "tokens": 0},
+        "tester": {"time": 0, "tokens": 0}
+    }
+    
+    try:
+        # Generate analyzer code
+        start_time = time.time()
+        analyzer_code = await agent.analyze_data_source(
+            source_type=source.type,
+            sample_data=source.sample_data,
+            context={"purpose": "analyze_data"}
+        )
+        llm_metrics["analyzer"]["time"] = time.time() - start_time
+        metrics.record_llm_metrics("analyzer", llm_metrics["analyzer"])
+        
+        # Generate transformer code
+        start_time = time.time()
+        transformer_code = await agent.generate_transformation(
+            source_type=source.type,
+            source_data=source.sample_data,
+            target_schema=target.schema,
+            context={"layer": "gold", "purpose": "transform_data"}
+        )
+        llm_metrics["transformer"]["time"] = time.time() - start_time
+        metrics.record_llm_metrics("transformer", llm_metrics["transformer"])
+        
+        # Generate test code
+        start_time = time.time()
+        test_code = await agent.generate_test_cases(
+            source_type=source.type,
+            source_data=source.sample_data,
+            target_schema=target.schema,
+            context={"test_types": scenario["tests"]}
+        )
+        llm_metrics["tester"]["time"] = time.time() - start_time
+        metrics.record_llm_metrics("tester", llm_metrics["tester"])
+        
+        return {
+            "analyzer_code": analyzer_code,
+            "transformer_code": transformer_code,
+            "test_code": test_code,
+            "metrics": llm_metrics
+        }
+        
+    except Exception as e:
+        logger.error(f"LLM code generation failed: {str(e)}")
+        raise
+
+
+async def run_scenario(
     scenario: Dict[str, Any],
     logger: logging.Logger
 ) -> Dict[str, Any]:
     """Run a single test scenario."""
     logger.info(f"Running scenario: {scenario['name']}")
     
-    # Create pipeline
-    pipeline = Pipeline(
-        source=Source(**scenario["source"]),
-        target=Target(**scenario["target"])
-    )
+    # Initialize performance metrics
+    metrics = PerformanceMetrics()
     
-    # Generate pipeline
-    logger.info("Generating pipeline...")
-    pipeline.generate()
-    
-    # Run tests
-    logger.info("Running tests...")
-    test_config = {
-        "source": scenario["source"],
-        "target": scenario["target"],
-        "tests": scenario["tests"]
-    }
-    
-    with open("temp_test_config.json", "w") as f:
-        json.dump(test_config, f)
-    
-    results = run_tests_sync("temp_test_config.json")
-    Path("temp_test_config.json").unlink()
-    
-    return {
-        "scenario": scenario["name"],
-        "results": results.to_dict()
-    }
+    try:
+        # Run LLM pipeline
+        llm_results = await run_llm_pipeline(scenario, logger, metrics)
+        
+        # Create pipeline with generated code
+        pipeline = Pipeline(
+            source=Source(**scenario["source"]),
+            target=Target(**scenario["target"]),
+            analyzer_code=llm_results["analyzer_code"],
+            transformer_code=llm_results["transformer_code"]
+        )
+        
+        # Generate pipeline
+        logger.info("Generating pipeline...")
+        pipeline.generate()
+        
+        # Run tests with generated test code
+        logger.info("Running tests...")
+        test_config = {
+            "source": scenario["source"],
+            "target": scenario["target"],
+            "tests": scenario["tests"],
+            "test_code": llm_results["test_code"]
+        }
+        
+        with open("temp_test_config.json", "w") as f:
+            json.dump(test_config, f)
+        
+        results = run_tests_sync("temp_test_config.json")
+        Path("temp_test_config.json").unlink()
+        
+        # Add performance metrics
+        metrics.record_execution_metrics(results)
+        
+        return {
+            "scenario": scenario["name"],
+            "results": results.to_dict(),
+            "llm_metrics": llm_results["metrics"],
+            "performance_metrics": metrics.to_dict()
+        }
+        
+    except Exception as e:
+        logger.error(f"Scenario {scenario['name']} failed: {str(e)}")
+        return {
+            "scenario": scenario["name"],
+            "error": str(e),
+            "performance_metrics": metrics.to_dict()
+        }
 
 
 async def run_all_scenarios(
@@ -114,15 +204,8 @@ async def run_all_scenarios(
     results = []
     
     for scenario in config["scenarios"]:
-        try:
-            result = await asyncio.to_thread(run_scenario, scenario, logger)
-            results.append(result)
-        except Exception as e:
-            logger.error(f"Scenario {scenario['name']} failed: {str(e)}")
-            results.append({
-                "scenario": scenario["name"],
-                "error": str(e)
-            })
+        result = await run_scenario(scenario, logger)
+        results.append(result)
     
     return results
 
@@ -146,6 +229,12 @@ def save_results(
         from sidewinder.testing.reporting import TestReport
         report = TestReport([r["results"] for r in results if "results" in r])
         report.generate_html_report(output_dir)
+        
+        # Generate performance report
+        report.generate_performance_report(
+            [r["performance_metrics"] for r in results],
+            output_dir
+        )
     
     logger.info(f"Results saved to {output_dir}")
 
@@ -171,7 +260,8 @@ def main():
         
         # Check for failures
         failed = any(
-            "error" in r or not r["results"]["success_rate"] == 1.0
+            "error" in r or 
+            ("results" in r and not r["results"]["success_rate"] == 1.0)
             for r in results
         )
         
