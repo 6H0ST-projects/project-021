@@ -1,35 +1,39 @@
 {
+    "source": {
+        "name": "customer_data",
+        "type": "parquet",
+        "path": "tests/data/source/customers.parquet"
+    },
+    "target": {
+        "name": "enriched_customers",
+        "type": "delta",
+        "path": "tests/data/target/customer_360",
+        "schema_path": "tests/data/target/customer_360_schema.json"
+    },
+    "environment": "development",
+    "test_data_location": "tests/data/test",
+    "max_parallel_tests": 4,
+    "max_parallel_suites": 2,
+    "max_memory_gb": 4.0,
+    "max_cpu_percent": 80,
+    "timeout_seconds": 300,
+    "llm_config": {
+        "model": "gpt-4-turbo-preview",
+        "temperature": 0.2,
+        "max_tokens": 4000,
+        "max_retries": 3,
+        "cache_dir": "tests/cache/llm"
+    },
     "scenarios": [
         {
-            "name": "customer_360_with_schema",
-            "description": "Generate customer 360 view with predefined schema",
+            "name": "customer_enrichment",
             "source": {
-                "type": "multi_source",
-                "sources": [
-                    {
-                        "name": "customers",
-                        "type": "json",
-                        "path": "tests/data/source/customers.json",
-                        "format": "json"
-                    },
-                    {
-                        "name": "orders",
-                        "type": "json",
-                        "path": "tests/data/source/orders.json",
-                        "format": "json"
-                    }
-                ],
-                "relationships": [
-                    {
-                        "from_table": "orders",
-                        "to_table": "customers",
-                        "type": "many_to_one",
-                        "keys": ["customer_id"]
-                    }
-                ]
+                "name": "customer_data",
+                "type": "parquet",
+                "path": "tests/data/source/customers.parquet"
             },
             "target": {
-                "name": "customer_360",
+                "name": "enriched_customers",
                 "type": "delta",
                 "path": "tests/data/target/customer_360",
                 "schema_path": "tests/data/target/customer_360_schema.json"
@@ -58,73 +62,121 @@
                     }
                 },
                 {
-                    "name": "business_rules",
-                    "type": "business_rules",
+                    "name": "analyzer_code_generation",
+                    "type": "code_generation",
+                    "dependencies": ["schema_validation"],
+                    "preset": "comprehensive",
                     "parameters": {
-                        "rules": [
+                        "task": "Generate data analysis code for customer data",
+                        "test_data_path": "tests/data/test/customer_sample.parquet",
+                        "requirements": [
+                            "Profile customer demographics",
+                            "Analyze purchase patterns",
+                            "Identify data quality issues",
+                            "Generate summary statistics"
+                        ],
+                        "validation_rules": [
                             {
-                                "name": "valid_age",
-                                "condition": "profile.age >= 0 AND profile.age <= 120"
+                                "type": "imports",
+                                "parameters": {
+                                    "required": ["pandas", "numpy"]
+                                }
                             },
                             {
-                                "name": "valid_credit_score",
-                                "condition": "profile.credit_score >= 300 AND profile.credit_score <= 850"
+                                "type": "functions",
+                                "parameters": {
+                                    "required": ["analyze_data"]
+                                }
                             },
                             {
-                                "name": "valid_metrics",
-                                "condition": "metrics.churn_risk >= 0.0 AND metrics.churn_risk <= 1.0"
+                                "type": "complexity",
+                                "parameters": {
+                                    "max_complexity": 10
+                                }
+                            },
+                            {
+                                "type": "documentation",
+                                "parameters": {
+                                    "min_coverage": 0.8
+                                }
                             }
                         ]
                     }
-                }
-            ]
-        },
-        {
-            "name": "customer_360_no_schema",
-            "description": "Generate customer 360 view with inferred schema",
-            "source": {
-                "type": "multi_source",
-                "sources": [
-                    {
-                        "name": "customers",
-                        "type": "json",
-                        "path": "tests/data/source/customers.json",
-                        "format": "json"
-                    },
-                    {
-                        "name": "orders",
-                        "type": "json",
-                        "path": "tests/data/source/orders.json",
-                        "format": "json"
-                    }
-                ],
-                "relationships": [
-                    {
-                        "from_table": "orders",
-                        "to_table": "customers",
-                        "type": "many_to_one",
-                        "keys": ["customer_id"]
-                    }
-                ]
-            },
-            "target": {
-                "name": "customer_360_inferred",
-                "type": "delta",
-                "path": "tests/data/target/customer_360_inferred"
-            },
-            "tests": [
+                },
                 {
-                    "name": "data_quality",
-                    "type": "data_quality",
-                    "preset": "standard",
+                    "name": "analyzer_code_execution",
+                    "type": "code_execution",
+                    "dependencies": ["analyzer_code_generation"],
                     "parameters": {
-                        "null_threshold": 0.1,
-                        "unique_columns": ["customer_id"]
+                        "code": "{generated_code}",
+                        "test_data_path": "tests/data/test/customer_sample.parquet",
+                        "expected_functions": ["analyze_data"],
+                        "test_cases": [
+                            "isinstance(analyze_data(test_data), dict)",
+                            "all(k in analyze_data(test_data) for k in ['schema', 'quality_issues', 'statistics'])"
+                        ]
+                    }
+                },
+                {
+                    "name": "transformer_code_generation",
+                    "type": "code_generation",
+                    "dependencies": ["data_quality"],
+                    "preset": "comprehensive",
+                    "parameters": {
+                        "task": "Generate transformation code for customer enrichment",
+                        "test_data_path": "tests/data/test/customer_sample.parquet",
+                        "requirements": [
+                            "Clean and standardize data",
+                            "Enrich customer profiles",
+                            "Calculate derived metrics",
+                            "Apply business rules"
+                        ],
+                        "validation_rules": [
+                            {
+                                "type": "imports",
+                                "parameters": {
+                                    "required": ["pandas", "numpy"]
+                                }
+                            },
+                            {
+                                "type": "functions",
+                                "parameters": {
+                                    "required": ["transform_data"]
+                                }
+                            },
+                            {
+                                "type": "complexity",
+                                "parameters": {
+                                    "max_complexity": 15
+                                }
+                            },
+                            {
+                                "type": "documentation",
+                                "parameters": {
+                                    "min_coverage": 0.8
+                                }
+                            }
+                        ]
+                    }
+                },
+                {
+                    "name": "transformer_code_execution",
+                    "type": "code_execution",
+                    "dependencies": ["transformer_code_generation"],
+                    "parameters": {
+                        "code": "{generated_code}",
+                        "test_data_path": "tests/data/test/customer_sample.parquet",
+                        "expected_functions": ["transform_data"],
+                        "test_cases": [
+                            "isinstance(transform_data(test_data), pd.DataFrame)",
+                            "all(field in transform_data(test_data).columns for field in target_schema.keys())"
+                        ]
                     }
                 },
                 {
                     "name": "data_consistency",
                     "type": "data_consistency",
+                    "dependencies": ["transformer_code_execution"],
                     "parameters": {
                         "checkpoints": [
                             {

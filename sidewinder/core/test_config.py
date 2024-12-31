@@ -20,6 +20,8 @@ class TestType(str, Enum):
     BUSINESS_RULES = "business_rules"
     LOAD_TEST = "load_test"
     INTEGRATION = "integration"
+    CODE_GENERATION = "code_generation"
+    CODE_EXECUTION = "code_execution"
 
 
 class DataQualityPreset(str, Enum):
@@ -39,15 +41,33 @@ class PerformancePreset(str, Enum):
     CUSTOM = "custom"  # User-defined configuration
 
 
+class CodeGenerationPreset(str, Enum):
+    """Preset code generation test configurations."""
+    BASIC = "basic"  # Basic functionality
+    COMPREHENSIVE = "comprehensive"  # Full feature set
+    EDGE_CASES = "edge_cases"  # Test edge cases
+    CUSTOM = "custom"  # User-defined configuration
+
+
+class LLMConfig(BaseModel):
+    """LLM-specific configuration."""
+    model: str = "gpt-4-turbo-preview"
+    temperature: float = 0.2
+    max_tokens: int = 4000
+    max_retries: int = 3
+    cache_dir: Optional[str] = None
+
+
 class TestConfig(BaseModel):
     """Individual test configuration."""
     name: str
     type: TestType
     enabled: bool = True
     description: Optional[str] = None
-    preset: Optional[Union[DataQualityPreset, PerformancePreset]] = None
+    preset: Optional[Union[DataQualityPreset, PerformancePreset, CodeGenerationPreset]] = None
     parameters: Dict[str, Any] = {}
     dependencies: List[str] = []
+    llm_config: Optional[LLMConfig] = None
 
 
 class GlobalTestConfig(BaseModel):
@@ -67,6 +87,9 @@ class GlobalTestConfig(BaseModel):
     max_memory_gb: float = 4.0
     max_cpu_percent: float = 80
     timeout_seconds: int = 300
+    
+    # LLM configuration
+    llm_config: Optional[LLMConfig] = None
     
     # Test definitions
     tests: List[TestConfig] = []
