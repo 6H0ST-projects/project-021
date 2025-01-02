@@ -1,24 +1,16 @@
 {
-    "source": {
-        "name": "customer_data",
-        "type": "parquet",
-        "path": "tests/data/source/customers.parquet"
+    "environment": {
+        "type": "local",
+        "config": {
+            "max_parallel_tests": 4,
+            "max_parallel_suites": 2,
+            "max_memory_gb": 4.0,
+            "max_cpu_percent": 80,
+            "timeout_seconds": 300
+        }
     },
-    "target": {
-        "name": "enriched_customers",
-        "type": "delta",
-        "path": "tests/data/target/customer_360",
-        "schema_path": "tests/data/target/customer_360_schema.json"
-    },
-    "environment": "development",
-    "test_data_location": "tests/data/test",
-    "max_parallel_tests": 4,
-    "max_parallel_suites": 2,
-    "max_memory_gb": 4.0,
-    "max_cpu_percent": 80,
-    "timeout_seconds": 300,
     "llm_config": {
-        "model": "gpt-4o",
+        "model": "gpt-4",
         "temperature": 0.2,
         "max_tokens": 4000,
         "max_retries": 3,
@@ -45,15 +37,64 @@
         {
             "name": "customer_enrichment",
             "source": {
-                "name": "customer_data",
-                "type": "parquet",
-                "path": "tests/data/source/customers.parquet"
+                "type": "file",
+                "location": "tests/data/source/customers.json",
+                "format": "json",
+                "sample_size": 1000,
+                "options": {
+                    "lines": true,
+                    "encoding": "utf-8"
+                }
             },
             "target": {
-                "name": "enriched_customers",
-                "type": "delta",
-                "path": "tests/data/target/customer_360",
-                "schema_path": "tests/data/target/customer_360_schema.json"
+                "type": "file",
+                "location": "tests/data/target/customer_360",
+                "format": "delta",
+                "target_schema": {
+                    "fields": {
+                        "customer_id": {
+                            "name": "customer_id",
+                            "type": "string",
+                            "required": true
+                        },
+                        "name": {
+                            "name": "name",
+                            "type": "string",
+                            "required": true
+                        },
+                        "email": {
+                            "name": "email",
+                            "type": "string",
+                            "required": true
+                        },
+                        "profile": {
+                            "name": "profile",
+                            "type": "struct",
+                            "fields": {
+                                "segment": {
+                                    "name": "segment",
+                                    "type": "string",
+                                    "required": true
+                                },
+                                "status": {
+                                    "name": "status",
+                                    "type": "string",
+                                    "required": true
+                                }
+                            }
+                        }
+                    },
+                    "primary_keys": ["customer_id"],
+                    "dependencies": {
+                        "profile.segment": ["total_orders", "total_spent"],
+                        "profile.status": ["last_order_date", "days_since_last_order"]
+                    }
+                },
+                "quality_thresholds": {
+                    "null_rate": 0.0,
+                    "correlation": 0.95,
+                    "cardinality_ratio": 0.9
+                }
             },
             "performance_thresholds": {
                 "total_time_seconds": 180,
@@ -84,139 +125,6 @@
                     "parameters": {
                         "null_threshold": 0.0,
                         "unique_columns": ["customer_id", "email"]
-                    }
-                },
-                {
-                    "name": "analyzer_code_generation",
-                    "type": "code_generation",
-                    "dependencies": ["schema_validation"],
-                    "preset": "comprehensive",
-                    "parameters": {
-                        "task": "Generate data analysis code for customer data",
-                        "test_data_path": "tests/data/test/customer_sample.parquet",
-                        "requirements": [
-                            "Profile customer demographics",
-                            "Analyze purchase patterns",
-                            "Identify data quality issues",
-                            "Generate summary statistics"
-                        ],
-                        "validation_rules": [
-                            {
-                                "type": "imports",
-                                "parameters": {
-                                    "required": ["pandas", "numpy"]
-                                }
-                            },
-                            {
-                                "type": "functions",
-                                "parameters": {
-                                    "required": ["analyze_data"]
-                                }
-                            },
-                            {
-                                "type": "complexity",
-                                "parameters": {
-                                    "max_complexity": 10
-                                }
-                            },
-                            {
-                                "type": "documentation",
-                                "parameters": {
-                                    "min_coverage": 0.8
-                                }
-                            }
-                        ]
-                    }
-                },
-                {
-                    "name": "analyzer_code_execution",
-                    "type": "code_execution",
-                    "dependencies": ["analyzer_code_generation"],
-                    "parameters": {
-                        "code": "{generated_code}",
-                        "test_data_path": "tests/data/test/customer_sample.parquet",
-                        "expected_functions": ["analyze_data"],
-                        "test_cases": [
-                            "isinstance(analyze_data(test_data), dict)",
-                            "all(k in analyze_data(test_data) for k in ['schema', 'quality_issues', 'statistics'])"
-                        ]
-                    }
-                },
-                {
-                    "name": "transformer_code_generation",
-                    "type": "code_generation",
-                    "dependencies": ["data_quality"],
-                    "preset": "comprehensive",
-                    "parameters": {
-                        "task": "Generate transformation code for customer enrichment",
-                        "test_data_path": "tests/data/test/customer_sample.parquet",
-                        "requirements": [
-                            "Clean and standardize data",
-                            "Enrich customer profiles",
-                            "Calculate derived metrics",
-                            "Apply business rules"
-                        ],
-                        "validation_rules": [
-                            {
-                                "type": "imports",
-                                "parameters": {
-                                    "required": ["pandas", "numpy"]
-                                }
-                            },
-                            {
-                                "type": "functions",
-                                "parameters": {
-                                    "required": ["transform_data"]
-                                }
-                            },
-                            {
-                                "type": "complexity",
-                                "parameters": {
-                                    "max_complexity": 15
-                                }
-                            },
-                            {
-                                "type": "documentation",
-                                "parameters": {
-                                    "min_coverage": 0.8
-                                }
-                            }
-                        ]
-                    }
-                },
-                {
-                    "name": "transformer_code_execution",
-                    "type": "code_execution",
-                    "dependencies": ["transformer_code_generation"],
-                    "parameters": {
-                        "code": "{generated_code}",
-                        "test_data_path": "tests/data/test/customer_sample.parquet",
-                        "expected_functions": ["transform_data"],
-                        "test_cases": [
-                            "isinstance(transform_data(test_data), pd.DataFrame)",
-                            "all(field in transform_data(test_data).columns for field in target_schema.keys())"
-                        ]
-                    }
-                },
-                {
-                    "name": "data_consistency",
-                    "type": "data_consistency",
-                    "dependencies": ["transformer_code_execution"],
-                    "parameters": {
-                        "checkpoints": [
-                            {
-                                "name": "customer_count",
-                                "source_query": "SELECT COUNT(*) FROM customers",
-                                "target_query": "SELECT COUNT(*) FROM customer_360_inferred",
-                                "expected": "equal"
-                            },
-                            {
-                                "name": "order_totals",
-                                "source_query": "SELECT SUM(total_amount) FROM orders",
-                                "target_query": "SELECT SUM(order_summary.total_spent) FROM customer_360_inferred",
-                                "expected": "equal"
-                            }
-                        ]
                     }
                 }
             ]

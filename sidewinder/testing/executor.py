@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import json
 from pathlib import Path
+import ast
 
 from sidewinder.core.test_config import GlobalTestConfig, TestConfig, TestType
 from sidewinder.testing.environment import TestEnvironment, TestContext

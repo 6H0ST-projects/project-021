@@ -1,57 +1,81 @@
 """
-Test reporting functionality for Sidewinder.
+Test reporting functionality.
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field
 import json
-from pathlib import Path
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from datetime import datetime
 import pandas as pd
 
 
+class TestResult(BaseModel):
+    """Result of a single test."""
+    name: str
+    type: str
+    status: str
+    duration: float
+    error: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+    metrics: Optional[Dict[str, float]] = None
+
+
+class TestSuiteResult(BaseModel):
+    """Results of a test suite."""
+    name: str
+    start_time: datetime
+    end_time: datetime
+    tests: List[TestResult]
+    success_rate: float
+    total_duration: float
+    metrics: Optional[Dict[str, float]] = None
+
+
 class TestReport:
-    """Generate test execution reports."""
+    """Test report generator."""
     
-    def __init__(self, results: List[Dict[str, Any]]):
+    def __init__(self, results: List[TestSuiteResult]):
         self.results = results
     
     def generate_html_report(self, output_dir: str):
-        """Generate HTML test report."""
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        """Generate HTML report with test results."""
+        # Create test results table
+        results_df = pd.DataFrame([
+            {
+                "Suite": result.name,
+                "Success Rate": f"{result.success_rate * 100:.1f}%",
+                "Duration": f"{result.total_duration:.2f}s",
+                "Tests": len(result.tests),
+                "Failed": len([t for t in result.tests if t.status == "failed"]),
+                "Start Time": result.start_time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            for result in self.results
+        ])
         
-        # Create report sections
-        sections = [
-            self._generate_summary_section(),
-            self._generate_test_details_section(),
-            self._generate_error_section()
-        ]
+        # Create test results figure
+        fig = go.Figure(data=[
+            go.Table(
+                header=dict(
+                    values=list(results_df.columns),
+                    fill_color="paleturquoise",
+                    align="left"
+                ),
+                cells=dict(
+                    values=[results_df[col] for col in results_df.columns],
+                    fill_color="lavender",
+                    align="left"
+                )
+            )
+        ])
         
-        # Combine sections into full report
-        report_html = """
-        <html>
-        <head>
-            <title>Sidewinder Test Report</title>
-            <style>
-                body { font-family: Arial, sans-serif; margin: 20px; }
-                .section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; }
-                .success { color: green; }
-                .failure { color: red; }
-                table { border-collapse: collapse; width: 100%; }
-                th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-                th { background-color: #f5f5f5; }
-            </style>
-        </head>
-        <body>
-            <h1>Sidewinder Test Report</h1>
-            {}
-        </body>
-        </html>
-        """.format("\n".join(sections))
+        fig.update_layout(
+            title="Test Suite Results",
+            margin=dict(t=30, b=10)
+        )
         
-        # Write report
-        with open(f"{output_dir}/test_report.html", "w") as f:
-            f.write(report_html)
+        # Save HTML report
+        fig.write_html(f"{output_dir}/test_report.html")
     
     def generate_performance_report(
         self,
@@ -59,203 +83,39 @@ class TestReport:
         output_dir: str
     ):
         """Generate performance metrics report."""
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        # Create performance metrics figure
+        metrics_df = pd.DataFrame(performance_metrics)
         
-        # Create performance visualizations
-        fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=(
-                "LLM Response Times",
-                "Component Execution Times",
-                "Resource Usage",
-                "Success Metrics"
-            )
-        )
+        fig = go.Figure()
         
-        # LLM response times
-        llm_times = pd.DataFrame([
-            {
-                "Component": component,
-                "Time (s)": metrics["llm"][component]["time"]
-            }
-            for metrics in performance_metrics
-            for component in metrics["llm"]
-        ])
+        # Add execution time trace
+        fig.add_trace(go.Scatter(
+            x=list(range(len(metrics_df))),
+            y=metrics_df["execution_time"],
+            name="Execution Time (s)",
+            mode="lines+markers"
+        ))
         
-        fig.add_trace(
-            go.Bar(
-                x=llm_times["Component"],
-                y=llm_times["Time (s)"],
-                name="LLM Response Time"
-            ),
-            row=1, col=1
-        )
+        # Add memory usage trace
+        fig.add_trace(go.Scatter(
+            x=list(range(len(metrics_df))),
+            y=metrics_df["memory_usage_mb"],
+            name="Memory Usage (MB)",
+            mode="lines+markers",
+            yaxis="y2"
+        ))
         
-        # Component execution times
-        exec_times = pd.DataFrame([
-            {
-                "Component": "Analyzer",
-                "Time (s)": metrics["execution"]["analyzer_time"]
-            }
-            for metrics in performance_metrics
-        ] + [
-            {
-                "Component": "Transformer",
-                "Time (s)": metrics["execution"]["transformer_time"]
-            }
-            for metrics in performance_metrics
-        ] + [
-            {
-                "Component": "Tests",
-                "Time (s)": metrics["execution"]["test_time"]
-            }
-            for metrics in performance_metrics
-        ])
-        
-        fig.add_trace(
-            go.Bar(
-                x=exec_times["Component"],
-                y=exec_times["Time (s)"],
-                name="Execution Time"
-            ),
-            row=1, col=2
-        )
-        
-        # Resource usage
-        resource_usage = pd.DataFrame([
-            {
-                "Metric": "Memory (MB)",
-                "Value": metrics["execution"]["memory_usage"]
-            }
-            for metrics in performance_metrics
-        ] + [
-            {
-                "Metric": "CPU (%)",
-                "Value": metrics["execution"]["cpu_usage"]
-            }
-            for metrics in performance_metrics
-        ])
-        
-        fig.add_trace(
-            go.Bar(
-                x=resource_usage["Metric"],
-                y=resource_usage["Value"],
-                name="Resource Usage"
-            ),
-            row=2, col=1
-        )
-        
-        # Success metrics
-        success_metrics = pd.DataFrame([
-            {
-                "Metric": "Success Rate",
-                "Value": metrics["execution"]["success_rate"] * 100
-            }
-            for metrics in performance_metrics
-        ] + [
-            {
-                "Metric": "Error Count",
-                "Value": metrics["execution"]["error_count"]
-            }
-            for metrics in performance_metrics
-        ])
-        
-        fig.add_trace(
-            go.Bar(
-                x=success_metrics["Metric"],
-                y=success_metrics["Value"],
-                name="Success Metrics"
-            ),
-            row=2, col=2
-        )
-        
-        # Update layout
         fig.update_layout(
-            height=800,
-            width=1200,
-            title_text="Performance Metrics",
-            showlegend=False
+            title="Performance Metrics",
+            xaxis_title="Test Run",
+            yaxis_title="Execution Time (s)",
+            yaxis2=dict(
+                title="Memory Usage (MB)",
+                overlaying="y",
+                side="right"
+            ),
+            showlegend=True
         )
         
-        # Save plot
-        fig.write_html(f"{output_dir}/performance_report.html")
-        
-        # Save raw metrics
-        with open(f"{output_dir}/performance_metrics.json", "w") as f:
-            json.dump(performance_metrics, f, indent=2)
-    
-    def _generate_summary_section(self) -> str:
-        """Generate summary section of the report."""
-        total_tests = sum(len(r.get("tests", [])) for r in self.results)
-        passed_tests = sum(
-            len([t for t in r.get("tests", []) if t["status"] == "passed"])
-            for r in self.results
-        )
-        
-        return f"""
-        <div class="section">
-            <h2>Summary</h2>
-            <p>Total Tests: {total_tests}</p>
-            <p>Passed Tests: {passed_tests}</p>
-            <p>Success Rate: {(passed_tests/total_tests*100):.2f}%</p>
-        </div>
-        """
-    
-    def _generate_test_details_section(self) -> str:
-        """Generate test details section of the report."""
-        details = []
-        
-        for result in self.results:
-            scenario = result.get("scenario", "Unknown")
-            tests = result.get("tests", [])
-            
-            details.append(f"""
-            <div class="section">
-                <h3>Scenario: {scenario}</h3>
-                <table>
-                    <tr>
-                        <th>Test</th>
-                        <th>Status</th>
-                        <th>Duration</th>
-                        <th>Details</th>
-                    </tr>
-                    {"".join(
-                        f'''
-                        <tr>
-                            <td>{test["name"]}</td>
-                            <td class="{test["status"]}">{test["status"]}</td>
-                            <td>{test.get("duration", "N/A")}s</td>
-                            <td>{test.get("details", "")}</td>
-                        </tr>
-                        '''
-                        for test in tests
-                    )}
-                </table>
-            </div>
-            """)
-        
-        return "\n".join(details)
-    
-    def _generate_error_section(self) -> str:
-        """Generate error section of the report."""
-        errors = []
-        
-        for result in self.results:
-            scenario = result.get("scenario", "Unknown")
-            if "error" in result:
-                errors.append(f"""
-                <div class="failure">
-                    <h4>Scenario: {scenario}</h4>
-                    <pre>{result["error"]}</pre>
-                </div>
-                """)
-        
-        if not errors:
-            return ""
-        
-        return f"""
-        <div class="section">
-            <h2>Errors</h2>
-            {"".join(errors)}
-        </div>
-        """ 
+        # Save performance report
+        fig.write_html(f"{output_dir}/performance_report.html") 

@@ -1,263 +1,277 @@
 """
-Data patterns and relationships for test data generation.
+Dynamic data pattern generation based on source data analysis.
 """
 
-from typing import Dict, Any, List, Optional, Callable
-from pydantic import BaseModel
-import numpy as np
+import logging
+from typing import Dict, Any, List, Optional, Union
 import pandas as pd
+import numpy as np
+from faker import Faker
 from datetime import datetime, timedelta
-import networkx as nx
 
-from sidewinder.testing.data_gen import ColumnProfile
+from sidewinder.testing.data_types import DataType, ColumnProfile
 
+# Setup logging
+logger = logging.getLogger(__name__)
+fake = Faker()
 
-class Relationship(BaseModel):
-    """Defines a relationship between tables/columns."""
-    from_table: str
-    to_table: str
-    type: str = "one_to_many"  # one_to_one, one_to_many, many_to_many
-    keys: List[str]
-    cardinality: Optional[Dict[str, float]] = None  # e.g., {"min": 1, "max": 10}
-    distribution: str = "uniform"  # uniform, normal, zipf
-
-
-class Pattern(BaseModel):
-    """Defines a data pattern."""
-    name: str
-    type: str  # sequence, cyclic, trend, correlation
-    parameters: Dict[str, Any]
-
-
-class DataPattern:
-    """Base class for data patterns."""
+def analyze_column_pattern(series: pd.Series) -> Dict[str, Any]:
+    """
+    Analyze a column to detect its pattern.
     
-    def apply(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Apply pattern to data."""
-        raise NotImplementedError
-
-
-class SequencePattern(DataPattern):
-    """Generates sequential patterns."""
+    Args:
+        series: pandas Series to analyze
+        
+    Returns:
+        Dictionary containing pattern information
+    """
+    pattern = {
+        "type": str(series.dtype),
+        "unique_count": series.nunique(),
+        "null_count": series.isnull().sum(),
+        "total_count": len(series),
+        "sample_values": series.dropna().sample(min(5, len(series))).tolist()
+    }
     
-    def __init__(
-        self,
-        start: Any,
-        step: Any,
-        noise_factor: float = 0.0
-    ):
-        self.start = start
-        self.step = step
-        self.noise_factor = noise_factor
+    # Detect numerical patterns
+    if pd.api.types.is_numeric_dtype(series):
+        pattern.update({
+            "min": float(series.min()) if not pd.isna(series.min()) else None,
+            "max": float(series.max()) if not pd.isna(series.max()) else None,
+            "mean": float(series.mean()) if not pd.isna(series.mean()) else None,
+            "std": float(series.std()) if not pd.isna(series.std()) else None,
+            "distribution": detect_distribution(series)
+        })
+        
+        # Check for sequence patterns
+        if is_sequential(series):
+            pattern["sequence_type"] = detect_sequence_type(series)
     
-    def apply(self, data: pd.DataFrame) -> pd.DataFrame:
-        size = len(data)
-        sequence = np.arange(size) * self.step + self.start
-        
-        if self.noise_factor > 0:
-            noise = np.random.normal(0, self.noise_factor * self.step, size)
-            sequence += noise
-        
-        return sequence
+    # Detect string patterns
+    elif pd.api.types.is_string_dtype(series):
+        pattern["string_pattern"] = detect_string_pattern(series)
+        if pattern["unique_count"] / pattern["total_count"] < 0.1:
+            pattern["categorical_distribution"] = series.value_counts(normalize=True).to_dict()
+    
+    # Detect datetime patterns
+    elif pd.api.types.is_datetime64_any_dtype(series):
+        pattern.update({
+            "min": series.min().isoformat() if not pd.isna(series.min()) else None,
+            "max": series.max().isoformat() if not pd.isna(series.max()) else None,
+            "temporal_pattern": detect_temporal_pattern(series)
+        })
+    
+    return pattern
 
-
-class CyclicPattern(DataPattern):
-    """Generates cyclic patterns."""
+def detect_distribution(series: pd.Series) -> str:
+    """Detect the statistical distribution of numerical data."""
+    if series.empty:
+        return "unknown"
     
-    def __init__(
-        self,
-        period: int,
-        amplitude: float = 1.0,
-        phase: float = 0.0,
-        noise_factor: float = 0.0
-    ):
-        self.period = period
-        self.amplitude = amplitude
-        self.phase = phase
-        self.noise_factor = noise_factor
+    # Calculate basic statistics
+    skew = series.skew()
+    kurtosis = series.kurtosis()
     
-    def apply(self, data: pd.DataFrame) -> pd.DataFrame:
-        size = len(data)
-        t = np.arange(size)
-        cycle = self.amplitude * np.sin(2 * np.pi * t / self.period + self.phase)
-        
-        if self.noise_factor > 0:
-            noise = np.random.normal(0, self.noise_factor * self.amplitude, size)
-            cycle += noise
-        
-        return cycle
-
-
-class TrendPattern(DataPattern):
-    """Generates trend patterns."""
-    
-    def __init__(
-        self,
-        type: str = "linear",  # linear, exponential, logarithmic
-        parameters: Dict[str, float] = {"slope": 1.0, "intercept": 0.0},
-        noise_factor: float = 0.0
-    ):
-        self.type = type
-        self.parameters = parameters
-        self.noise_factor = noise_factor
-    
-    def apply(self, data: pd.DataFrame) -> pd.DataFrame:
-        size = len(data)
-        t = np.arange(size)
-        
-        if self.type == "linear":
-            trend = self.parameters["slope"] * t + self.parameters["intercept"]
-        elif self.type == "exponential":
-            trend = self.parameters["base"] ** t * self.parameters["scale"]
-        elif self.type == "logarithmic":
-            trend = self.parameters["scale"] * np.log(t + 1) + self.parameters["intercept"]
-        else:
-            raise ValueError(f"Unsupported trend type: {self.type}")
-        
-        if self.noise_factor > 0:
-            noise = np.random.normal(0, self.noise_factor * np.std(trend), size)
-            trend += noise
-        
-        return trend
-
-
-class CorrelationPattern(DataPattern):
-    """Generates correlated data."""
-    
-    def __init__(
-        self,
-        correlation: float,
-        base_column: str,
-        noise_factor: float = 0.0
-    ):
-        self.correlation = correlation
-        self.base_column = base_column
-        self.noise_factor = noise_factor
-    
-    def apply(self, data: pd.DataFrame) -> pd.DataFrame:
-        if self.base_column not in data.columns:
-            raise ValueError(f"Base column {self.base_column} not found in data")
-        
-        base = data[self.base_column].values
-        size = len(base)
-        
-        # Generate correlated data
-        noise = np.random.normal(0, 1, size)
-        correlated = (
-            self.correlation * base +
-            np.sqrt(1 - self.correlation**2) * noise
-        )
-        
-        if self.noise_factor > 0:
-            extra_noise = np.random.normal(0, self.noise_factor * np.std(correlated), size)
-            correlated += extra_noise
-        
-        return correlated
-
-
-class RelationshipHandler:
-    """Handles relationships between tables."""
-    
-    def __init__(self, relationships: List[Relationship]):
-        self.relationships = relationships
-        self.graph = self._build_graph()
-    
-    def _build_graph(self) -> nx.DiGraph:
-        """Build relationship graph."""
-        graph = nx.DiGraph()
-        
-        for rel in self.relationships:
-            graph.add_edge(
-                rel.from_table,
-                rel.to_table,
-                relationship=rel
-            )
-        
-        return graph
-    
-    def _generate_foreign_keys(
-        self,
-        relationship: Relationship,
-        primary_keys: np.ndarray,
-        size: int
-    ) -> np.ndarray:
-        """Generate foreign keys based on relationship type."""
-        if relationship.type == "one_to_one":
-            return np.random.permutation(primary_keys)[:size]
-        
-        elif relationship.type == "one_to_many":
-            min_refs = relationship.cardinality.get("min", 1) if relationship.cardinality else 1
-            max_refs = relationship.cardinality.get("max", 5) if relationship.cardinality else 5
-            
-            if relationship.distribution == "uniform":
-                refs_per_row = np.random.randint(min_refs, max_refs + 1, size)
-            elif relationship.distribution == "normal":
-                mean_refs = (min_refs + max_refs) / 2
-                std_refs = (max_refs - min_refs) / 4
-                refs_per_row = np.clip(
-                    np.random.normal(mean_refs, std_refs, size),
-                    min_refs,
-                    max_refs
-                ).astype(int)
-            elif relationship.distribution == "zipf":
-                alpha = relationship.cardinality.get("alpha", 2.0) if relationship.cardinality else 2.0
-                refs_per_row = np.random.zipf(alpha, size)
-                refs_per_row = np.clip(refs_per_row, min_refs, max_refs)
-            
-            return np.repeat(primary_keys, refs_per_row)
-        
-        elif relationship.type == "many_to_many":
-            # TODO: Implement many-to-many relationships
-            pass
-        
-        raise ValueError(f"Unsupported relationship type: {relationship.type}")
-    
-    def apply_relationships(
-        self,
-        tables: Dict[str, pd.DataFrame]
-    ) -> Dict[str, pd.DataFrame]:
-        """Apply relationships to generated tables."""
-        # Sort tables by dependency order
-        table_order = list(nx.topological_sort(self.graph))
-        
-        # Process tables in order
-        for table_name in table_order:
-            # Get incoming relationships
-            incoming = self.graph.in_edges(table_name, data=True)
-            
-            for from_table, to_table, data in incoming:
-                relationship = data["relationship"]
-                
-                # Generate foreign keys
-                primary_keys = tables[to_table][relationship.keys[0]].values
-                size = len(tables[from_table])
-                
-                foreign_keys = self._generate_foreign_keys(
-                    relationship,
-                    primary_keys,
-                    size
-                )
-                
-                # Update table with foreign keys
-                tables[from_table][relationship.keys[0]] = foreign_keys
-        
-        return tables
-
-
-def apply_pattern(
-    pattern: Pattern,
-    data: pd.DataFrame
-) -> pd.DataFrame:
-    """Apply a pattern to data."""
-    if pattern.type == "sequence":
-        generator = SequencePattern(**pattern.parameters)
-    elif pattern.type == "cyclic":
-        generator = CyclicPattern(**pattern.parameters)
-    elif pattern.type == "trend":
-        generator = TrendPattern(**pattern.parameters)
-    elif pattern.type == "correlation":
-        generator = CorrelationPattern(**pattern.parameters)
+    if abs(skew) < 0.5 and abs(kurtosis) < 0.5:
+        return "normal"
+    elif skew > 1:
+        return "right_skewed"
+    elif skew < -1:
+        return "left_skewed"
+    elif kurtosis > 1:
+        return "heavy_tailed"
     else:
-        raise ValueError(f"Unsupported pattern type: {pattern.type}")
+        return "unknown"
+
+def is_sequential(series: pd.Series) -> bool:
+    """Check if the series follows a sequential pattern."""
+    if series.empty or len(series) < 2:
+        return False
     
-    return generator.apply(data) 
+    diffs = series.diff().dropna()
+    unique_diffs = diffs.unique()
+    return len(unique_diffs) == 1
+
+def detect_sequence_type(series: pd.Series) -> str:
+    """Detect the type of sequence (linear, exponential, etc.)."""
+    if not is_sequential(series):
+        return "none"
+    
+    # Check for linear sequence
+    diffs = series.diff().dropna()
+    if len(diffs.unique()) == 1:
+        return "linear"
+    
+    # Check for exponential sequence
+    ratios = (series / series.shift(1)).dropna()
+    if len(ratios.unique()) == 1:
+        return "exponential"
+    
+    return "unknown"
+
+def detect_string_pattern(series: pd.Series) -> str:
+    """Detect common string patterns."""
+    if series.empty:
+        return "unknown"
+    
+    # Sample non-null values
+    sample = series.dropna().iloc[0] if not series.empty else ""
+    
+    if series.str.contains(r'@').any():
+        return "email"
+    elif series.str.contains(r'\d{3}[-.]?\d{3}[-.]?\d{4}').any():
+        return "phone"
+    elif series.str.contains(r'\d{4}-\d{2}-\d{2}').any():
+        return "date"
+    elif series.str.match(r'^[A-Z0-9]{8,}$').all():
+        return "id"
+    elif series.str.contains(r'^[A-Z][a-z]+(\s[A-Z][a-z]+)*$').any():
+        return "name"
+    else:
+        return "text"
+
+def detect_temporal_pattern(series: pd.Series) -> Dict[str, Any]:
+    """Detect patterns in temporal data."""
+    if series.empty:
+        return {"type": "unknown"}
+    
+    # Calculate time differences
+    diffs = series.diff().dropna()
+    
+    # Check for regular intervals
+    unique_diffs = diffs.unique()
+    if len(unique_diffs) == 1:
+        return {
+            "type": "regular_interval",
+            "interval": str(unique_diffs[0])
+        }
+    
+    # Check for daily pattern
+    hour_counts = series.dt.hour.value_counts()
+    if len(hour_counts) < 24 and hour_counts.max() / hour_counts.sum() > 0.2:
+        return {
+            "type": "daily_pattern",
+            "peak_hours": hour_counts.nlargest(3).index.tolist()
+        }
+    
+    # Check for weekly pattern
+    day_counts = series.dt.dayofweek.value_counts()
+    if day_counts.max() / day_counts.sum() > 0.2:
+        return {
+            "type": "weekly_pattern",
+            "peak_days": day_counts.nlargest(3).index.tolist()
+        }
+    
+    return {"type": "irregular"}
+
+def generate_column_data(
+    pattern: Dict[str, Any],
+    size: int,
+    seed: Optional[int] = None
+) -> pd.Series:
+    """
+    Generate column data based on detected pattern.
+    
+    Args:
+        pattern: Pattern dictionary from analyze_column_pattern
+        size: Number of rows to generate
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Generated pandas Series
+    """
+    if seed is not None:
+        np.random.seed(seed)
+        fake.seed_instance(seed)
+    
+    # Generate numerical data
+    if pattern["type"].startswith(('int', 'float')):
+        if pattern.get("sequence_type") == "linear":
+            start = pattern["min"]
+            step = (pattern["max"] - pattern["min"]) / (size - 1)
+            data = np.arange(start, pattern["max"] + step, step)[:size]
+        elif pattern.get("sequence_type") == "exponential":
+            base = (pattern["max"] / pattern["min"]) ** (1 / (size - 1))
+            data = pattern["min"] * np.power(base, np.arange(size))
+        else:
+            if pattern["distribution"] == "normal":
+                data = np.random.normal(pattern["mean"], pattern["std"], size)
+            elif pattern["distribution"] in ["right_skewed", "heavy_tailed"]:
+                data = np.random.exponential(pattern["mean"], size)
+            else:
+                data = np.random.uniform(pattern["min"], pattern["max"], size)
+    
+    # Generate string data
+    elif pattern["type"] == "object":
+        if pattern.get("string_pattern") == "email":
+            data = [fake.email() for _ in range(size)]
+        elif pattern.get("string_pattern") == "phone":
+            data = [fake.phone_number() for _ in range(size)]
+        elif pattern.get("string_pattern") == "name":
+            data = [fake.name() for _ in range(size)]
+        elif pattern.get("string_pattern") == "id":
+            data = [fake.uuid4() for _ in range(size)]
+        elif pattern.get("categorical_distribution"):
+            categories = list(pattern["categorical_distribution"].keys())
+            weights = list(pattern["categorical_distribution"].values())
+            data = np.random.choice(categories, size=size, p=weights)
+        else:
+            data = [fake.text(max_nb_chars=50) for _ in range(size)]
+    
+    # Generate datetime data
+    elif pattern["type"].startswith('datetime'):
+        if pattern.get("temporal_pattern", {}).get("type") == "regular_interval":
+            interval = pd.Timedelta(pattern["temporal_pattern"]["interval"])
+            start = pd.to_datetime(pattern["min"])
+            data = [start + interval * i for i in range(size)]
+        else:
+            start = pd.to_datetime(pattern["min"])
+            end = pd.to_datetime(pattern["max"])
+            data = [fake.date_time_between(start_date=start, end_date=end) for _ in range(size)]
+    
+    # Convert to series and apply null ratio if specified
+    series = pd.Series(data)
+    if pattern["null_count"] > 0:
+        null_ratio = pattern["null_count"] / pattern["total_count"]
+        null_mask = np.random.random(size) < null_ratio
+        series[null_mask] = None
+    
+    return series
+
+def generate_related_data(
+    base_data: pd.DataFrame,
+    relationship: Dict[str, Any],
+    size: int,
+    seed: Optional[int] = None
+) -> pd.Series:
+    """
+    Generate related column data based on base data and relationship.
+    
+    Args:
+        base_data: DataFrame containing the base data
+        relationship: Dictionary describing the relationship
+        size: Number of rows to generate
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Generated pandas Series with related data
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    base_values = base_data[relationship["base_column"]].unique()
+    
+    if relationship["type"] == "one_to_one":
+        return pd.Series(np.random.permutation(base_values)[:size])
+    
+    elif relationship["type"] == "one_to_many":
+        min_refs = relationship.get("min_refs", 1)
+        max_refs = relationship.get("max_refs", 5)
+        refs_per_row = np.random.randint(min_refs, max_refs + 1, size)
+        return pd.Series(np.repeat(base_values, refs_per_row)[:size])
+    
+    elif relationship["type"] == "many_to_many":
+        return pd.Series(np.random.choice(base_values, size=size))
+    
+    else:
+        raise ValueError(f"Unsupported relationship type: {relationship['type']}") 

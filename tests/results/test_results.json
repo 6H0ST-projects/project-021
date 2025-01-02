@@ -1,0 +1,38 @@
+[
+  {
+    "scenario": "customer_enrichment",
+    "error": "Pipeline.__init__() got an unexpected keyword argument 'analyzer_code'",
+    "performance_metrics": {
+      "llm": {
+        "analyzer": {
+          "time": 0.005681037902832031,
+          "tokens": 0,
+          "retries": 0,
+          "errors": []
+        },
+        "transformer": {
+          "time": 15.943331956863403,
+          "tokens": 0,
+          "retries": 0,
+          "errors": []
+        },
+        "tester": {
+          "time": 36.520406007766724,
+          "tokens": 0,
+          "retries": 0,
+          "errors": []
+        }
+      },
+      "execution": {
+        "total_time": 0.0,
+        "analyzer_time": 0.0,
+        "transformer_time": 0.0,
+        "test_time": 0.0,
+        "memory_usage": 0.0,
+        "cpu_usage": 0.0,
+        "success_rate": 0.0,
+        "error_count": 0
+      }
+    }
+  }
+]

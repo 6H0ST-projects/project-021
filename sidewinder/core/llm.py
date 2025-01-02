@@ -14,6 +14,9 @@ import instructor
 from openai import OpenAI
 import pandas as pd
 import numpy as np
+import traceback
+from sidewinder.core.analyzer import analyze_data
+from sidewinder.core.config import TargetSchema
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -40,15 +43,26 @@ class CodeExecutionError(BaseModel):
     """Details about a code execution error."""
     error_type: str
     error_message: str
-    traceback: str
+    traceback: Optional[str] = None
     context: Dict[str, Any]
+
+    @classmethod
+    def from_exception(cls, e: Exception, context: Dict[str, Any]) -> "CodeExecutionError":
+        """Create error details from an exception."""
+        import traceback as tb
+        return cls(
+            error_type=type(e).__name__,
+            error_message=str(e),
+            traceback=tb.format_exc(),
+            context=context
+        )
 
 class LLMCodeGenerator:
     """Core LLM code generation service."""
     
     def __init__(
         self,
-        model: str = "gpt-4o",
+        model: str = "gpt-4",
         temperature: float = 0.2,
         max_tokens: int = 4000,
         max_retries: int = 3
@@ -66,9 +80,11 @@ class LLMCodeGenerator:
                 "You are an expert Python developer specializing in data engineering. "
                 "Your task is to generate high-quality, efficient, and well-documented code "
                 "that follows best practices. The code should be production-ready and include "
-                "proper error handling, logging, and type hints."
+                "proper error handling, logging, and type hints.\n\n"
+                "IMPORTANT: Always wrap your code in ```python and ``` markers.\n"
+                "IMPORTANT: Make sure to implement the exact function name as specified in the context."
             )),
-            MessagesPlaceholder(key="context"),
+            MessagesPlaceholder(variable_name="context_messages"),
             HumanMessage(content=(
                 "Task: {task}\n"
                 "Requirements: {requirements}\n"
@@ -80,7 +96,9 @@ class LLMCodeGenerator:
                 "3. Implement proper error handling\n"
                 "4. Add type hints\n"
                 "5. Include logging\n"
-                "6. Follow PEP 8 style guidelines"
+                "6. Follow PEP 8 style guidelines\n\n"
+                "Remember to wrap your code in ```python and ``` markers.\n"
+                "Remember to implement the exact function name as specified in the context."
             ))
         ])
         
@@ -99,15 +117,19 @@ class LLMCodeGenerator:
                 "7. Implement efficient aggregations (e.g., pre-aggregate when possible)\n"
                 "8. Use CTEs for better readability and optimization\n"
                 "9. Implement proper error handling and NULL value management\n"
-                "10. Add clear comments explaining complex logic and performance considerations"
+                "10. Add clear comments explaining complex logic and performance considerations\n\n"
+                "IMPORTANT: Always wrap your code in ```python and ``` markers.\n"
+                "IMPORTANT: Make sure to implement the exact function name as specified in the context."
             )),
-            MessagesPlaceholder(key="context"),
+            MessagesPlaceholder(variable_name="context_messages"),
             HumanMessage(content=(
                 "Task: {task}\n"
                 "Requirements: {requirements}\n"
                 "Constraints: {constraints}\n"
                 "Context: {context}\n\n"
-                "Generate performant SQL code that scales to large datasets."
+                "Generate performant SQL code that scales to large datasets.\n"
+                "Remember to wrap your code in ```python and ``` markers.\n"
+                "Remember to implement the exact function name as specified in the context."
             ))
         ])
         
@@ -117,9 +139,11 @@ class LLMCodeGenerator:
                 "You are an expert Python developer specializing in data engineering. "
                 "Your task is to fix and improve code that encountered errors during execution. "
                 "Analyze the error, identify the root cause, and generate an improved version "
-                "that addresses the issue while maintaining all functionality."
+                "that addresses the issue while maintaining all functionality.\n\n"
+                "IMPORTANT: Always wrap your code in ```python and ``` markers.\n"
+                "IMPORTANT: Make sure to implement the exact function name as specified in the context."
             )),
-            MessagesPlaceholder(key="history"),
+            MessagesPlaceholder(variable_name="history"),
             HumanMessage(content=(
                 "The following code encountered an error:\n"
                 "```python\n{code}\n```\n\n"
@@ -128,14 +152,17 @@ class LLMCodeGenerator:
                 "Message: {error_message}\n"
                 "Traceback: {traceback}\n\n"
                 "Context: {context}\n\n"
-                "Please fix the code and explain your changes."
+                "Please fix the code and explain your changes.\n"
+                "Remember to wrap your code in ```python and ``` markers.\n"
+                "Remember to implement the exact function name as specified in the context."
             ))
         ])
     
     async def generate_code(
         self,
         request: CodeGenerationRequest,
-        execution_context: Optional[Dict[str, Any]] = None
+        execution_context: Optional[Dict[str, Any]] = None,
+        use_sql_prompt: bool = False
     ) -> CodeGenerationResponse:
         """
         Generate code using the LLM with iterative refinement.
@@ -143,6 +170,7 @@ class LLMCodeGenerator:
         Args:
             request: Code generation request containing task and context
             execution_context: Optional context for code execution and testing
+            use_sql_prompt: Whether to use the SQL-specific prompt template
             
         Returns:
             Generated code and metadata
@@ -153,23 +181,73 @@ class LLMCodeGenerator:
         while attempts < self.max_retries:
             try:
                 # Format prompt with request details and conversation history
-                formatted_prompt = self.prompt.format_messages(
-                    task=request.task,
-                    requirements=request.requirements,
-                    constraints=request.constraints or [],
-                    context=json.dumps(request.context, indent=2),
-                    context_messages=conversation_history
-                )
+                prompt_template = self.sql_prompt if use_sql_prompt else self.prompt
+                
+                # Format requirements and constraints as bullet points
+                formatted_requirements = "\n".join(f"- {req}" for req in request.requirements)
+                formatted_constraints = "\n".join(f"- {const}" for const in (request.constraints or []))
+                
+                # Format context with pretty indentation
+                formatted_context = json.dumps(request.context, indent=2)
+                
+                # Create human message with filled placeholders
+                human_message = HumanMessage(content=(
+                    f"Task: {request.task}\n"
+                    f"Requirements:\n{formatted_requirements}\n"
+                    f"Constraints:\n{formatted_constraints}\n"
+                    f"Context:\n{formatted_context}\n\n"
+                    "Generate the code following these guidelines:\n"
+                    "1. Include necessary imports\n"
+                    "2. Add comprehensive docstrings\n"
+                    "3. Implement proper error handling\n"
+                    "4. Add type hints\n"
+                    "5. Include logging\n"
+                    "6. Follow PEP 8 style guidelines\n\n"
+                    "Remember to wrap your code in ```python and ``` markers.\n"
+                    "Remember to implement the exact function name as specified in the context."
+                ))
+                
+                # Create message list
+                messages = [
+                    SystemMessage(content=(
+                        "You are an expert Python developer specializing in data engineering. "
+                        "Your task is to generate high-quality, efficient, and well-documented code "
+                        "that follows best practices. The code should be production-ready and include "
+                        "proper error handling, logging, and type hints.\n\n"
+                        "IMPORTANT: Always wrap your code in ```python and ``` markers.\n"
+                        "IMPORTANT: Make sure to implement the exact function name as specified in the context."
+                    )),
+                    *conversation_history,
+                    human_message
+                ]
+                
+                # Print formatted prompt for debugging
+                print("\n=== Formatted Prompt ===")
+                for msg in messages:
+                    print(f"{msg.type}: {msg.content}")
+                print("=== End Prompt ===\n")
                 
                 # Get LLM response
-                response = await self.llm.ainvoke(formatted_prompt)
+                response = await self.llm.ainvoke(messages)
+                
+                # Print response for debugging
+                print("\n=== Model Response ===")
+                print(response.content)
+                print("=== End Response ===\n")
+                
                 conversation_history.append(response)
                 
                 # Parse code blocks from response
                 code_blocks = self._extract_code_blocks(response.content)
                 
                 if not code_blocks:
-                    raise ValueError("No code blocks found in response")
+                    print("No code blocks found in response. Attempting fallback extraction...")
+                    # Try fallback extraction
+                    code_blocks = self._extract_code_blocks_fallback(response.content)
+                    if not code_blocks:
+                        raise ValueError("No code blocks found in response")
+                    else:
+                        print("Found code blocks using fallback extraction.")
                 
                 # Extract imports
                 imports = self._extract_imports(code_blocks[0])
@@ -183,12 +261,7 @@ class LLMCodeGenerator:
                         )
                     except Exception as e:
                         # Create error details for refinement
-                        error_details = CodeExecutionError(
-                            error_type=type(e).__name__,
-                            error_message=str(e),
-                            traceback=e.__traceback__.format(),
-                            context=execution_context
-                        )
+                        error_details = CodeExecutionError.from_exception(e, execution_context)
                         
                         # Log the error
                         logger.error(
@@ -225,6 +298,51 @@ class LLMCodeGenerator:
                 logger.warning(
                     f"Code generation attempt {attempts} failed: {str(e)}. Retrying..."
                 )
+    
+    def _extract_code_blocks_fallback(self, text: str) -> List[str]:
+        """Fallback method to extract code blocks using more lenient parsing."""
+        blocks = []
+        
+        # First try to find code between triple backticks
+        parts = text.split("```")
+        if len(parts) > 1:
+            # Extract code from every other part (between backticks)
+            for i in range(1, len(parts), 2):
+                code = parts[i].strip()
+                if code.startswith("python"):
+                    code = code[6:].strip()  # Remove "python" prefix
+                if code:
+                    blocks.append(code)
+        
+        # If no blocks found, try to extract Python-like code
+        if not blocks:
+            lines = text.split("\n")
+            current_block = []
+            in_code = False
+            
+            for line in lines:
+                stripped = line.strip()
+                
+                # Check for Python code indicators
+                if (stripped.startswith(("def ", "class ", "import ", "from ")) or
+                    stripped.endswith(":") or
+                    "=" in stripped or
+                    stripped.startswith(("@", "#", "    ", "\t"))):
+                    in_code = True
+                    current_block.append(line)
+                elif in_code:
+                    if stripped:
+                        current_block.append(line)
+                    else:
+                        if current_block:
+                            blocks.append("\n".join(current_block))
+                            current_block = []
+                        in_code = False
+            
+            if current_block:
+                blocks.append("\n".join(current_block))
+        
+        return blocks
     
     async def _test_code_execution(
         self,
@@ -284,25 +402,29 @@ class LLMCodeGenerator:
         Returns:
             Refined code
         """
-        # Format refinement prompt
-        formatted_prompt = self.refinement_prompt.format_messages(
-            code=code,
-            error_type=error.error_type,
-            error_message=error.error_message,
-            traceback=error.traceback,
-            context=json.dumps(error.context, indent=2),
-            history=history
-        )
-        
-        # Get LLM response
-        response = await self.llm.ainvoke(formatted_prompt)
-        
-        # Extract refined code
-        code_blocks = self._extract_code_blocks(response.content)
-        if not code_blocks:
-            raise ValueError("No code blocks found in refinement response")
-        
-        return code_blocks[0]
+        try:
+            # Format refinement prompt
+            formatted_prompt = self.refinement_prompt.format_messages(
+                code=code,
+                error_type=error.error_type,
+                error_message=error.error_message,
+                traceback="\n".join(traceback.format_tb(error.traceback)) if error.traceback else "No traceback available",
+                context=json.dumps(error.context, indent=2),
+                history=history
+            )
+            
+            # Get LLM response
+            response = await self.llm.ainvoke(formatted_prompt)
+            
+            # Extract refined code
+            code_blocks = self._extract_code_blocks(response.content)
+            if not code_blocks:
+                raise ValueError("No code blocks found in refinement response")
+            
+            return code_blocks[0]
+        except Exception as e:
+            logger.error(f"Code refinement failed: {str(e)}")
+            raise
     
     def _extract_code_blocks(self, text: str) -> List[str]:
         """Extract code blocks from markdown-formatted text."""
@@ -325,429 +447,156 @@ class LLMCodeGenerator:
         return imports
 
 class DataEngineeringAgent:
-    """Agent for generating data engineering code."""
+    """Core LLM code generation service."""
     
-    def __init__(self):
-        self.code_generator = LLMCodeGenerator()
+    def __init__(
+        self,
+        model: str = "gpt-4",
+        temperature: float = 0.2,
+        max_tokens: int = 4000,
+        max_retries: int = 3
+    ):
+        self.llm = ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        self.max_retries = max_retries
     
     async def analyze_data_source(
         self,
         source_type: str,
-        sample_data: Any,
+        sample_data: pd.DataFrame,
         context: Dict[str, Any]
-    ) -> str:
+    ) -> Dict[str, Any]:
         """
-        Generate data analysis code for a given source.
+        Analyze a data source using our existing analyzer.
         
         Args:
             source_type: Type of data source
-            sample_data: Sample of the data to analyze
-            context: Additional context about the source
+            sample_data: Sample data to analyze
+            context: Additional context for analysis
             
         Returns:
-            Generated analysis code
+            Analysis results
         """
-        # Create execution context with test data and expected functions
-        execution_context = {
-            "source_data": sample_data,
-            "pandas": pd,
-            "numpy": np,
-            "expected_functions": [
-                context.get("purpose", "analyze_data")
-            ],
-            "test_cases": [
-                # Basic function existence and signature
-                f"callable(locals().get('{context.get('purpose', 'analyze_data')}')",
-                # Input validation
-                f"hasattr(locals().get('{context.get('purpose', 'analyze_data')}', '__code__'), 'co_varnames')",
-                # Return type validation
-                f"isinstance({context.get('purpose', 'analyze_data')}(source_data), dict)"
-            ]
-        }
-        
-        request = CodeGenerationRequest(
-            task=f"Generate comprehensive data analysis code for {source_type} data source",
-            context={
-                "source_type": source_type,
-                "sample_data": str(sample_data)[:1000] if sample_data is not None else None,  # Truncate for LLM context
-                **context
-            },
-            requirements=[
-                "Implement data profiling",
-                "Detect data quality issues",
-                "Infer schema and data types",
-                "Generate summary statistics",
-                "Identify patterns and anomalies"
-            ],
-            constraints=[
-                "Handle large datasets efficiently",
-                "Use pandas and numpy for analysis",
-                "Include proper error handling",
-                "Add logging for important steps"
-            ]
-        )
-        
-        response = await self.code_generator.generate_code(request, execution_context)
-        return response.code
+        try:
+            # Use our existing analyzer
+            results = analyze_data(sample_data)
+            return results
+            
+        except Exception as e:
+            logger.error(f"Analysis failed: {str(e)}")
+            raise
     
     async def generate_transformation(
         self,
         source_type: str,
-        source_data: Any,
-        target_schema: Dict[str, Any],
-        context: Dict[str, Any]
+        source_data: pd.DataFrame,
+        target_schema: Optional[TargetSchema] = None,
+        context: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Generate transformation code based on source data and target schema.
+        Generate transformation code.
         
         Args:
             source_type: Type of data source
-            source_data: Source data to transform
-            target_schema: Target schema to transform to
-            context: Additional context
+            source_data: Sample data to transform
+            target_schema: Optional target schema
+            context: Additional context for transformation
             
         Returns:
             Generated transformation code
         """
-        layer = context.get("layer", "transform")
-        purpose = context.get("purpose", "transform_data")
-        
-        # Create execution context with test data and expected functions
-        execution_context = {
-            "source_data": source_data,
-            "target_schema": target_schema,
-            "pandas": pd,
-            "numpy": np,
-            "expected_functions": [
-                f"create_{layer}_layer" if layer != "transform" else purpose
-            ],
-            "test_cases": [
-                # Basic function existence and signature
-                f"callable(locals().get('create_{layer}_layer' if '{layer}' != 'transform' else '{purpose}'))",
-                # Input validation
-                f"hasattr(locals().get('create_{layer}_layer' if '{layer}' != 'transform' else '{purpose}'), '__code__')",
-                # Schema validation if target schema provided
-                f"all(field in create_{layer}_layer(source_data).columns for field in {list(target_schema.keys())})" if target_schema else "True"
-            ]
-        }
-
-        # Add SQL-specific performance requirements for transformation layers
-        sql_performance_requirements = [
-            "Write performant SQL that scales to large datasets",
-            "Optimize JOIN operations and minimize expensive operations",
-            "Use window functions instead of self-joins where appropriate",
-            "Implement efficient aggregations and handle data skew",
-            "Leverage partitioning and clustering when available"
-        ]
-
-        sql_performance_constraints = [
-            "Avoid cross joins and correlated subqueries",
-            "Minimize shuffling and data movement",
-            "Consider column ordering for performance",
-            "Use appropriate indexing strategies",
-            "Handle NULL values efficiently"
-        ]
-        
-        request = CodeGenerationRequest(
-            task=f"Generate {layer} layer transformation code",
-            context={
-                "source_type": source_type,
-                "source_data": str(source_data)[:1000] if source_data is not None else None,
-                "target_schema": target_schema,
-                **context
-            },
-            requirements=[
-                "Implement data cleaning and standardization",
-                "Handle data type conversions",
-                "Apply business rules and transformations",
-                "Validate against target schema",
-                "Maintain data quality",
-                *sql_performance_requirements
-            ],
-            constraints=[
-                "Optimize for performance",
-                "Handle errors gracefully",
-                "Support incremental processing",
-                "Maintain data lineage",
-                *sql_performance_constraints
-            ]
-        )
-        
-        # Use SQL-specific prompt for transformation code generation
-        formatted_prompt = self.sql_prompt.format_messages(
-            task=request.task,
-            requirements=request.requirements,
-            constraints=request.constraints,
-            context=json.dumps(request.context, indent=2)
-        )
-        
-        # Get LLM response with SQL-specific prompt
-        response = await self.llm.ainvoke(formatted_prompt)
-        
-        # Extract code blocks and process as before
-        code_blocks = self._extract_code_blocks(response.content)
-        if not code_blocks:
-            raise ValueError("No code blocks found in response")
-        
-        return CodeGenerationResponse(
-            code=code_blocks[0],
-            explanation=response.content.split("```")[0].strip(),
-            imports=self._extract_imports(code_blocks[0]),
-            tests=code_blocks[1:] if len(code_blocks) > 1 else None
-        )
-    
-    async def generate_test_data(
-        self,
-        source_type: str,
-        source_data: Any,
-        target_schema: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> str:
-        """
-        Generate test data based on source schema and constraints.
-        
-        Args:
-            source_type: Type of data source
-            source_data: Sample source data
-            target_schema: Target schema for validation
-            context: Additional context
+        try:
+            # Convert target schema to dictionary if present
+            schema_dict = target_schema.dict() if target_schema else None
             
-        Returns:
-            Generated test data generation code
-        """
-        # Create execution context with dependencies and expected functions
-        execution_context = {
-            "source_data": source_data,
-            "target_schema": target_schema,
-            "pandas": pd,
-            "numpy": np,
-            "expected_functions": ["generate_test_data"],
-            "test_cases": [
-                # Basic function existence and signature
-                "callable(locals().get('generate_test_data'))",
-                # Input validation
-                "hasattr(locals().get('generate_test_data'), '__code__')",
-                # Output validation
-                "isinstance(generate_test_data(source_data), (pd.DataFrame, dict))",
-                # Schema validation if target schema provided
-                f"all(field in generate_test_data(source_data).columns for field in {list(target_schema.keys())})" if target_schema else "True"
-            ]
-        }
-        
-        request = CodeGenerationRequest(
-            task="Generate comprehensive test data",
-            context={
-                "source_type": source_type,
-                "source_data": str(source_data)[:1000] if source_data is not None else None,
-                "target_schema": target_schema,
-                **context
-            },
-            requirements=[
-                "Generate representative test data",
-                "Include edge cases and special values",
-                "Match source data distribution",
-                "Validate against schema",
-                "Include data quality issues"
-            ],
-            constraints=[
-                "Maintain data relationships",
-                "Generate reasonable volume",
-                "Include all required fields",
-                "Match data types and formats"
-            ]
-        )
-        
-        response = await self.code_generator.generate_code(request, execution_context)
-        return response.code
+            # Create transformation request
+            request = CodeGenerationRequest(
+                task="Generate data transformation code",
+                context={
+                    "source_type": source_type,
+                    "sample_data": source_data.head().to_string(),
+                    "target_schema": schema_dict,
+                    **(context or {})
+                },
+                requirements=[
+                    "Implement transform_data function that takes source_data as input",
+                    "Apply necessary data transformations",
+                    "Validate against target schema if provided",
+                    "Handle data type conversions",
+                    "Implement error handling"
+                ],
+                constraints=[
+                    "Handle large datasets efficiently",
+                    "Use pandas and numpy for transformations",
+                    "Include proper error handling",
+                    "Add logging for important steps"
+                ]
+            )
+            
+            # Generate code
+            generator = LLMCodeGenerator()
+            response = await generator.generate_code(request, use_sql_prompt=True)
+            return response.code
+            
+        except Exception as e:
+            logger.error(f"Transformation generation failed: {str(e)}")
+            raise
     
     async def generate_test_cases(
         self,
         source_type: str,
-        source_data: Any,
-        target_schema: Dict[str, Any],
-        context: Dict[str, Any]
+        source_data: pd.DataFrame,
+        target_schema: Optional[TargetSchema] = None,
+        context: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Generate test cases for data validation.
+        Generate test cases.
         
         Args:
             source_type: Type of data source
-            source_data: Data to test
-            target_schema: Target schema for validation
-            context: Additional context
+            source_data: Sample data to test
+            target_schema: Optional target schema
+            context: Additional context for testing
             
         Returns:
-            Generated test case code
+            Generated test code
         """
-        # Create execution context with dependencies and expected functions
-        execution_context = {
-            "test_data": source_data,
-            "target_schema": target_schema,
-            "pandas": pd,
-            "numpy": np,
-            "expected_functions": ["execute_test_cases"],
-            "test_cases": [
-                # Basic function existence and signature
-                "callable(locals().get('execute_test_cases'))",
-                # Input validation
-                "hasattr(locals().get('execute_test_cases'), '__code__')",
-                # Output validation
-                "isinstance(execute_test_cases(test_data), dict)",
-                # Results structure
-                "all(k in execute_test_cases(test_data) for k in ['passed', 'failed', 'errors'])"
-            ]
-        }
-        
-        request = CodeGenerationRequest(
-            task="Generate comprehensive test cases",
-            context={
-                "source_type": source_type,
-                "source_data": str(source_data)[:1000] if source_data is not None else None,
-                "target_schema": target_schema,
-                **context
-            },
-            requirements=[
-                "Test data quality rules",
-                "Validate schema compliance",
-                "Check data relationships",
-                "Verify transformations",
-                "Test edge cases"
-            ],
-            constraints=[
-                "Include all critical checks",
-                "Report detailed results",
-                "Handle errors gracefully",
-                "Support parallel execution"
-            ]
-        )
-        
-        response = await self.code_generator.generate_code(request, execution_context)
-        return response.code
-    
-    async def validate_test_results(
-        self,
-        source_type: str,
-        source_data: Any,
-        target_schema: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> str:
-        """
-        Generate validation code for test results.
-        
-        Args:
-            source_type: Type of data source
-            source_data: Test results to validate
-            target_schema: Target schema for validation
-            context: Additional context
+        try:
+            # Convert target schema to dictionary if present
+            schema_dict = target_schema.dict() if target_schema else None
             
-        Returns:
-            Generated validation code
-        """
-        # Create execution context with dependencies and expected functions
-        execution_context = {
-            "test_results": source_data,
-            "target_schema": target_schema,
-            "pandas": pd,
-            "numpy": np,
-            "expected_functions": ["validate_test_results"],
-            "test_cases": [
-                # Basic function existence and signature
-                "callable(locals().get('validate_test_results'))",
-                # Input validation
-                "hasattr(locals().get('validate_test_results'), '__code__')",
-                # Output validation
-                "isinstance(validate_test_results(test_results, target_schema), dict)",
-                # Validation structure
-                "all(k in validate_test_results(test_results, target_schema) for k in ['valid', 'issues', 'metrics'])"
-            ]
-        }
-        
-        request = CodeGenerationRequest(
-            task="Generate test results validation code",
-            context={
-                "source_type": source_type,
-                "source_data": str(source_data)[:1000] if source_data is not None else None,
-                "target_schema": target_schema,
-                **context
-            },
-            requirements=[
-                "Validate test coverage",
-                "Verify success criteria",
-                "Calculate quality metrics",
-                "Generate summary report",
-                "Identify improvement areas"
-            ],
-            constraints=[
-                "Consider all test types",
-                "Provide actionable insights",
-                "Include trend analysis",
-                "Support result aggregation"
-            ]
-        )
-        
-        response = await self.code_generator.generate_code(request, execution_context)
-        return response.code
-    
-    async def measure_performance(
-        self,
-        source_type: str,
-        source_data: Any,
-        target_schema: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> str:
-        """
-        Generate performance measurement code.
-        
-        Args:
-            source_type: Type of data source
-            source_data: Test results to measure
-            target_schema: Target schema for validation
-            context: Additional context
+            # Create test request
+            request = CodeGenerationRequest(
+                task="Generate test cases",
+                context={
+                    "source_type": source_type,
+                    "sample_data": source_data.head().to_string(),
+                    "target_schema": schema_dict,
+                    **(context or {})
+                },
+                requirements=[
+                    "Implement test_data function that takes source_data as input",
+                    "Validate data quality",
+                    "Check schema compliance",
+                    "Verify transformations",
+                    "Test error handling"
+                ],
+                constraints=[
+                    "Use pytest for testing",
+                    "Include data validation tests",
+                    "Add performance tests",
+                    "Test error cases"
+                ]
+            )
             
-        Returns:
-            Generated performance measurement code
-        """
-        # Create execution context with dependencies and expected functions
-        execution_context = {
-            "test_results": source_data,
-            "validation_results": context.get("validation_results"),
-            "pandas": pd,
-            "numpy": np,
-            "expected_functions": ["measure_performance"],
-            "test_cases": [
-                # Basic function existence and signature
-                "callable(locals().get('measure_performance'))",
-                # Input validation
-                "hasattr(locals().get('measure_performance'), '__code__')",
-                # Output validation
-                "isinstance(measure_performance(test_results, validation_results), dict)",
-                # Metrics structure
-                "all(k in measure_performance(test_results, validation_results) for k in ['execution_time', 'memory_usage', 'throughput'])"
-            ]
-        }
-        
-        request = CodeGenerationRequest(
-            task="Generate performance measurement code",
-            context={
-                "source_type": source_type,
-                "source_data": str(source_data)[:1000] if source_data is not None else None,
-                "target_schema": target_schema,
-                **context
-            },
-            requirements=[
-                "Measure execution time",
-                "Track resource usage",
-                "Calculate throughput",
-                "Monitor bottlenecks",
-                "Generate performance report"
-            ],
-            constraints=[
-                "Minimize overhead",
-                "Handle large datasets",
-                "Support distributed execution",
-                "Include benchmarks"
-            ]
-        )
-        
-        response = await self.code_generator.generate_code(request, execution_context)
-        return response.code 
+            # Generate code
+            generator = LLMCodeGenerator()
+            response = await generator.generate_code(request)
+            return response.code
+            
+        except Exception as e:
+            logger.error(f"Test generation failed: {str(e)}")
+            raise 

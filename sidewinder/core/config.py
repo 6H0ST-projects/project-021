@@ -147,6 +147,13 @@ class SchemaField(BaseModel):
     validation_rules: Optional[List[str]] = None
     feature_config: Optional[FeatureConfig] = None
 
+    def dict(self, *args, **kwargs) -> Dict[str, Any]:
+        """Convert to dictionary, ensuring all values are JSON serializable."""
+        d = super().dict(*args, **kwargs)
+        if d.get('feature_config'):
+            d['feature_config'] = d['feature_config'].dict()
+        return d
+
 
 class TargetSchema(BaseModel):
     """Schema definition for the target data."""
@@ -155,6 +162,12 @@ class TargetSchema(BaseModel):
     partitioning_keys: Optional[List[str]] = None
     clustering_keys: Optional[List[str]] = None
     dependencies: Optional[Dict[str, List[str]]] = None
+
+    def dict(self, *args, **kwargs) -> Dict[str, Any]:
+        """Convert to dictionary, ensuring all values are JSON serializable."""
+        d = super().dict(*args, **kwargs)
+        d['fields'] = {k: v.dict() for k, v in self.fields.items()}
+        return d
 
 
 class AutoFeatureConfig(BaseModel):
@@ -190,5 +203,33 @@ class Target(BaseModel):
             "null_rate": 0.1,
             "correlation": 0.95,
             "cardinality_ratio": 0.9
+        }
+    ) 
+
+
+class TransformationType(str, Enum):
+    """Supported transformation types."""
+    BRONZE = "bronze"
+    SILVER = "silver"
+    GOLD = "gold"
+    VALIDATION = "validation"
+
+
+class TransformationConfig(BaseModel):
+    """Configuration for data transformations."""
+    name: str = Field(..., description="Name of the transformation")
+    type: TransformationType = Field(..., description="Type of transformation (e.g., bronze, silver, gold)")
+    description: Optional[str] = None
+    source_columns: List[str]
+    target_columns: List[str]
+    transformation_logic: Optional[str] = None
+    dependencies: Optional[List[str]] = None
+    parameters: Optional[Dict[str, Any]] = None
+    validation_rules: Optional[List[str]] = None
+    performance_requirements: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "max_execution_time": 3600,  # seconds
+            "max_memory_usage": "4g",
+            "max_concurrent_tasks": 4
         }
     ) 

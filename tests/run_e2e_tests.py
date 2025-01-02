@@ -8,6 +8,11 @@ from pathlib import Path
 import asyncio
 from typing import Dict, Any, List
 import time
+from dotenv import load_dotenv
+import pandas as pd
+
+# Load environment variables from .env.local
+load_dotenv('.env.local')
 
 from sidewinder.core.config import Source, Target
 from sidewinder.core.pipeline import Pipeline
@@ -57,17 +62,17 @@ def generate_sample_data(config: Dict[str, Any], logger: logging.Logger):
     
     logger.info("Generating sample test data...")
     
-    # Generate data for each source
+    # Generate data for each scenario
     for scenario in config["scenarios"]:
-        for source in scenario["source"]["sources"]:
-            source_config = Source(**source)
-            
-            generate_test_data(
-                source=source_config,
-                output_path=f"{output_dir}/{source['name']}.parquet",
-                sample_size=gen_config["sample_size"],
-                seed=gen_config["seed"]
-            )
+        source_config = Source(**scenario["source"])
+        
+        # Generate test data
+        generate_test_data(
+            source=source_config,
+            output_path=f"{output_dir}/{scenario['name']}.{source_config.format}",
+            sample_size=gen_config["sample_size"],
+            seed=gen_config["seed"]
+        )
     
     logger.info("Sample data generation complete")
 
@@ -84,6 +89,27 @@ async def run_llm_pipeline(
     
     logger.info("Starting LLM code generation pipeline...")
     
+    # Load sample data
+    if source.type == "file":
+        if source.format == "json":
+            with open(source.location) as f:
+                json_data = json.load(f)
+            # Handle nested JSON structures
+            if isinstance(json_data, dict):
+                for key, value in json_data.items():
+                    if isinstance(value, list):
+                        json_data = value
+                        break
+            sample_data = pd.DataFrame(json_data)
+        elif source.format == "parquet":
+            sample_data = pd.read_parquet(source.location)
+        elif source.format == "csv":
+            sample_data = pd.read_csv(source.location)
+        else:
+            raise ValueError(f"Unsupported file format: {source.format}")
+    else:
+        raise ValueError(f"Unsupported source type: {source.type}")
+    
     # Track LLM performance metrics
     llm_metrics = {
         "analyzer": {"time": 0, "tokens": 0},
@@ -96,7 +122,7 @@ async def run_llm_pipeline(
         start_time = time.time()
         analyzer_code = await agent.analyze_data_source(
             source_type=source.type,
-            sample_data=source.sample_data,
+            sample_data=sample_data,
             context={"purpose": "analyze_data"}
         )
         llm_metrics["analyzer"]["time"] = time.time() - start_time
@@ -106,8 +132,8 @@ async def run_llm_pipeline(
         start_time = time.time()
         transformer_code = await agent.generate_transformation(
             source_type=source.type,
-            source_data=source.sample_data,
-            target_schema=target.schema,
+            source_data=sample_data,
+            target_schema=target.target_schema,
             context={"layer": "gold", "purpose": "transform_data"}
         )
         llm_metrics["transformer"]["time"] = time.time() - start_time
@@ -117,8 +143,8 @@ async def run_llm_pipeline(
         start_time = time.time()
         test_code = await agent.generate_test_cases(
             source_type=source.type,
-            source_data=source.sample_data,
-            target_schema=target.schema,
+            source_data=sample_data,
+            target_schema=target.target_schema,
             context={"test_types": scenario["tests"]}
         )
         llm_metrics["tester"]["time"] = time.time() - start_time
