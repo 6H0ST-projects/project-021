@@ -21,6 +21,7 @@ from sidewinder.agents.base import BaseAgent, BaseAgentState
 from sidewinder.core.config import Source, SourceType, TransformationConfig
 from sidewinder.core.llm import DataEngineeringAgent, CodeGenerationRequest
 from sidewinder.core.state import TransformerState
+from sidewinder.agents.analyzer import DiscoveredSource, InferredRelationship
 
 # Initialize Spark session for local mode
 spark = SparkSession.builder \
@@ -44,38 +45,15 @@ class TransformationStep(BaseModel):
     results: Optional[Dict[str, Any]] = None
 
 
-class TransformerState(BaseAgentState):
-    """State for the transformer agent."""
-    source: Source
-    target_schema: Optional[Dict[str, Any]] = None
-    transformation_steps: List[TransformationStep] = Field(default_factory=list)
-    bronze_data: Optional[Dict[str, Any]] = None
-    silver_data: Optional[Dict[str, Any]] = None
-    gold_data: Optional[Dict[str, Any]] = None
-    validation_results: Optional[Dict[str, Any]] = None
-    execution_time: float = 0.0
-
-
 class TransformationDesigner(BaseAgent[TransformerState]):
     """Agent for designing data transformations."""
     
-    def __init__(self, code: Optional[str] = None):
-        """
-        Initialize the transformer agent.
-        
-        Args:
-            code: LLM-generated code for custom transformations
-        """
-        super().__init__()
-        self.code = code
-        self.llm_agent = DataEngineeringAgent()
-        
     async def run(self, state: TransformerState) -> TransformerState:
         """
-        Design and execute the transformation pipeline:
-        1. Bronze layer: Raw data ingestion and standardization
-        2. Silver layer: Data cleaning and enrichment
-        3. Gold layer: Business logic application
+        Design and execute the transformation pipeline for discovered sources:
+        1. Load discovered source data into bronze layer
+        2. Apply transformations based on inferred relationships for silver layer
+        3. Generate gold layer output matching target schema
         
         Args:
             state: Current transformer state
@@ -84,323 +62,299 @@ class TransformationDesigner(BaseAgent[TransformerState]):
             Updated transformer state with transformation results
         """
         try:
-            logger.info("Starting transformation design...")
+            logger.info("Starting transformation pipeline design...")
             start_time = time.time()
             
-            # Initialize state fields
-            state.transformation_steps = []
-            state.bronze_data = {"raw": {}, "cleaned": {}}
-            state.silver_data = {"transformed": {}, "validated": {}}
-            state.gold_data = {"final": {}, "metadata": {}}
-            state.validation_results = {"checks": [], "metrics": {}}
+            # Bronze Layer: Load and standardize raw data
+            await self._create_bronze_layer(state)
             
-            # Convert input data to Spark DataFrame if needed
-            if isinstance(state.source.sample_data, str):
-                sample_data = spark.read.json(state.source.sample_data)
-            else:
-                sample_data = spark.createDataFrame(state.source.sample_data)
+            # Silver Layer: Apply relationships and transformations
+            await self._create_silver_layer(state)
             
-            # Execute transformation code
-            exec(self.code, globals(), locals())
+            # Gold Layer: Final transformations to match target schema
+            if state.target_schema:
+                await self._create_gold_layer(state)
             
-            # Update state with results
-            if "transform_data" in locals():
-                results = locals()["transform_data"](sample_data)
-                if isinstance(results, dict):
-                    if "transformation_steps" in results:
-                        state.transformation_steps.extend(results["transformation_steps"])
-                    if "bronze_data" in results:
-                        state.bronze_data.update(results["bronze_data"])
-                    if "silver_data" in results:
-                        state.silver_data.update(results["silver_data"])
-                    if "gold_data" in results:
-                        state.gold_data.update(results["gold_data"])
-                    if "validation_results" in results:
-                        state.validation_results.update(results["validation_results"])
+            # Validate results
+            state.validation_results = await self._validate_results(state)
             
             state.completed = True
-            state.messages.append("Transformation completed successfully")
+            state.messages.append("Transformation pipeline completed successfully")
             
         except Exception as e:
             state.error = str(e)
-            state.messages.append(f"Transformation failed: {str(e)}")
+            state.messages.append(f"Transformation pipeline failed: {str(e)}")
             
         finally:
             state.execution_time = time.time() - start_time
             
         return state
-            
-    async def _create_bronze_layer(self, state: TransformerState) -> Dict[str, Any]:
-        """Create bronze layer transformations."""
-        logger.info("Creating bronze layer...")
+
+    async def _create_bronze_layer(self, state: TransformerState) -> None:
+        """Create bronze layer by loading and standardizing raw data."""
         try:
-            if self.code:
-                # Use LLM-generated code for bronze layer
-                request = CodeGenerationRequest(
-                    task="Create bronze layer transformations using Spark SQL",
-                    context={
-                        "source_type": state.source.type,
-                        "source_location": state.source.location,
-                        "source_config": state.source.config
-                    },
-                    requirements=[
-                        "Use Spark SQL for data ingestion",
-                        "Schema standardization",
-                        "Data type conversion",
-                        "Quality checks"
-                    ],
-                    constraints=[
-                        "Handle large datasets efficiently",
-                        "Use Spark SQL operations",
-                        "Preserve raw data"
-                    ]
-                )
-                response = await self.llm_agent.generate_code(request)
-                # Execute generated code
-                exec(response.code, globals(), locals())
-                state.bronze_data = locals().get("bronze_data", {})
+            for source in state.discovered_sources.values():
+                # Load raw data
+                df = await self._load_source_data(source)
+                
+                # Basic standardization
+                df = self._standardize_column_names(df)
+                df = self._add_metadata_columns(df, source)
+                
+                # Store in bronze layer
+                state.bronze_data[source.name] = df
+                
+                # Add transformation step
                 state.transformation_steps.append(
                     TransformationStep(
-                        name="bronze_layer",
-                        description="Raw data ingestion and standardization",
-                        code=response.code
+                        name=f"bronze_{source.name}",
+                        description=f"Load and standardize {source.name} data",
+                        code=self._generate_bronze_code(source)
                     )
                 )
-            else:
-                # Use default bronze layer transformations with Spark SQL
-                data = spark.read.format(state.source.type) \
-                    .load(state.source.location)
-                state.bronze_data = {
-                    "data": data.collect(),
-                    "metadata": {
-                        "timestamp": datetime.now().isoformat(),
-                        "source": state.source.dict()
-                    }
-                }
-            
-            # Ensure all required fields are written
-            state.messages = state.messages or []
-            state.error = None
-            state.completed = True
-            state.source = state.source
-            state.target_schema = state.target_schema
-            state.transformation_steps = state.transformation_steps or []
-            state.bronze_data = state.bronze_data or {}
-            state.silver_data = state.silver_data or {}
-            state.gold_data = state.gold_data or {}
-            state.validation_results = state.validation_results or {}
-            state.execution_time = 0.0
-            
-            state.messages.append("Bronze layer creation completed")
-            return {"state": state}
+                
         except Exception as e:
-            state.error = str(e)
-            state.messages.append(f"Bronze layer creation failed: {str(e)}")
-            return {"state": state}
+            logger.error(f"Error creating bronze layer: {str(e)}")
+            raise
 
-    async def _create_silver_layer(self, state: TransformerState) -> Dict[str, Any]:
-        """Create silver layer transformations."""
-        logger.info("Creating silver layer...")
+    async def _create_silver_layer(self, state: TransformerState) -> None:
+        """Create silver layer by applying relationships and business logic."""
         try:
-            if self.code:
-                # Use LLM-generated code for silver layer
-                request = CodeGenerationRequest(
-                    task="Create silver layer transformations",
-                    context={
-                        "source_type": state.source.type,
-                        "bronze_data": state.bronze_data,
-                        "target_schema": state.target_schema
-                    },
-                    requirements=[
-                        "Data cleaning",
-                        "Data enrichment",
-                        "Data validation",
-                        "Quality improvements"
-                    ],
-                    constraints=[
-                        "Handle large datasets",
-                        "Memory efficient",
-                        "Maintain data lineage"
-                    ]
+            # Sort relationships by confidence
+            sorted_relationships = sorted(
+                state.inferred_relationships,
+                key=lambda r: r.confidence,
+                reverse=True
+            )
+            
+            # Apply transformations based on relationships
+            for relationship in sorted_relationships:
+                result_name = await self._apply_relationship_transformation(
+                    state,
+                    relationship
                 )
-                response = await self.llm_agent.generate_code(request)
-                # Execute generated code
-                exec(response.code, globals(), locals())
-                state.silver_data = locals().get("silver_data", {})
-                state.transformation_steps.append(
-                    TransformationStep(
-                        name="silver_layer",
-                        description="Data cleaning and enrichment",
-                        code=response.code,
-                        dependencies=["bronze_layer"]
+                
+                # Store in silver layer
+                if result_name:
+                    state.silver_data[result_name] = state.intermediate_results[result_name]
+            
+        except Exception as e:
+            logger.error(f"Error creating silver layer: {str(e)}")
+            raise
+
+    async def _create_gold_layer(self, state: TransformerState) -> None:
+        """Create gold layer by transforming data to match target schema."""
+        try:
+            if not state.target_schema:
+                return
+                
+            # Start with the most complete silver dataset
+            base_df = self._get_most_complete_silver_df(state)
+            
+            # Apply schema transformations
+            final_df = self._apply_schema_transformations(
+                base_df,
+                state.target_schema
+            )
+            
+            # Store in gold layer
+            state.gold_data["final"] = final_df
+            
+            # Add transformation step
+            state.transformation_steps.append(
+                TransformationStep(
+                    name="gold_layer",
+                    description="Transform data to match target schema",
+                    code=self._generate_gold_code(state.target_schema)
+                )
+            )
+            
+        except Exception as e:
+            logger.error(f"Error creating gold layer: {str(e)}")
+            raise
+
+    def _standardize_column_names(self, df: DataFrame) -> DataFrame:
+        """Standardize column names to snake_case."""
+        for col in df.columns:
+            new_col = col.lower().replace(" ", "_")
+            df = df.withColumnRenamed(col, new_col)
+        return df
+
+    def _add_metadata_columns(self, df: DataFrame, source: DiscoveredSource) -> DataFrame:
+        """Add metadata columns to track data lineage."""
+        return df.withColumns({
+            "source_system": F.lit(source.name),
+            "ingestion_timestamp": F.current_timestamp(),
+            "batch_id": F.lit(datetime.now().strftime("%Y%m%d_%H%M%S"))
+        })
+
+    def _generate_bronze_code(self, source: DiscoveredSource) -> str:
+        """Generate code for bronze layer transformation."""
+        return f"""
+        # Load raw data from {source.name}
+        df = spark.read.format("{source.format}").load("{source.path}")
+        
+        # Standardize column names
+        for col in df.columns:
+            new_col = col.lower().replace(" ", "_")
+            df = df.withColumnRenamed(col, new_col)
+            
+        # Add metadata columns
+        df = df.withColumns({{
+            "source_system": F.lit("{source.name}"),
+            "ingestion_timestamp": F.current_timestamp(),
+            "batch_id": F.lit(datetime.now().strftime("%Y%m%d_%H%M%S"))
+        }})
+        """
+
+    def _get_most_complete_silver_df(self, state: TransformerState) -> DataFrame:
+        """Get the most complete silver layer DataFrame."""
+        if not state.silver_data:
+            raise ValueError("No silver layer data available")
+            
+        # Find the DataFrame with the most columns
+        most_complete_df = None
+        max_columns = 0
+        
+        for df in state.silver_data.values():
+            num_columns = len(df.columns)
+            if num_columns > max_columns:
+                max_columns = num_columns
+                most_complete_df = df
+                
+        return most_complete_df
+
+    def _apply_schema_transformations(
+        self,
+        df: DataFrame,
+        target_schema: Dict[str, Any]
+    ) -> DataFrame:
+        """Apply transformations to match target schema."""
+        for col_name, col_type in target_schema.items():
+            if col_name not in df.columns:
+                # Handle missing columns based on type
+                if col_type == "string":
+                    df = df.withColumn(col_name, F.lit(None).cast("string"))
+                elif col_type in ["int", "long"]:
+                    df = df.withColumn(col_name, F.lit(None).cast(col_type))
+                elif col_type == "double":
+                    df = df.withColumn(col_name, F.lit(None).cast("double"))
+                elif col_type == "boolean":
+                    df = df.withColumn(col_name, F.lit(None).cast("boolean"))
+                elif col_type == "timestamp":
+                    df = df.withColumn(col_name, F.lit(None).cast("timestamp"))
+            else:
+                # Cast existing columns to target type
+                df = df.withColumn(col_name, F.col(col_name).cast(col_type))
+                
+        return df
+
+    def _generate_gold_code(self, target_schema: Dict[str, Any]) -> str:
+        """Generate code for gold layer transformation."""
+        code_lines = ["# Transform data to match target schema"]
+        
+        for col_name, col_type in target_schema.items():
+            code_lines.append(f"""
+            if "{col_name}" not in df.columns:
+                df = df.withColumn("{col_name}", F.lit(None).cast("{col_type}"))
+            else:
+                df = df.withColumn("{col_name}", F.col("{col_name}").cast("{col_type}"))
+            """)
+            
+        return "\n".join(code_lines)
+
+    async def _load_source_data(self, source: DiscoveredSource) -> DataFrame:
+        """Load data from a discovered source."""
+        try:
+            return spark.read.format(source.format).load(source.path)
+        except Exception as e:
+            logger.error(f"Error loading source {source.name}: {str(e)}")
+            raise
+
+    async def _apply_relationship_transformation(
+        self,
+        state: TransformerState,
+        relationship: InferredRelationship
+    ) -> None:
+        """Apply transformations based on inferred relationship."""
+        try:
+            from_df = state.source_dataframes[relationship.from_source]
+            to_df = state.source_dataframes[relationship.to_source]
+            
+            # Generate intermediate transformation name
+            transform_name = f"{relationship.from_source}_{relationship.to_source}_join"
+            
+            # Apply join transformation based on relationship type
+            if relationship.relationship_type == "one_to_many":
+                result = from_df.join(
+                    to_df,
+                    from_df[relationship.keys["from"]] == to_df[relationship.keys["to"]],
+                    "left"
+                )
+            elif relationship.relationship_type == "many_to_one":
+                result = from_df.join(
+                    to_df,
+                    from_df[relationship.keys["from"]] == to_df[relationship.keys["to"]],
+                    "right"
+                )
+            elif relationship.relationship_type == "one_to_one":
+                result = from_df.join(
+                    to_df,
+                    from_df[relationship.keys["from"]] == to_df[relationship.keys["to"]],
+                    "inner"
+                )
+            else:  # many_to_many or unknown
+                result = from_df.join(
+                    to_df,
+                    from_df[relationship.keys["from"]] == to_df[relationship.keys["to"]],
+                    "inner"
+                )
+            
+            # Store intermediate result
+            state.intermediate_results[transform_name] = result
+            
+            # Add transformation step
+            state.transformation_steps.append(
+                TransformationStep(
+                    name=transform_name,
+                    description=f"Join {relationship.from_source} with {relationship.to_source} ({relationship.relationship_type})",
+                    code=f"""
+                    # Join {relationship.from_source} with {relationship.to_source}
+                    {transform_name} = {relationship.from_source}_df.join(
+                        {relationship.to_source}_df,
+                        {relationship.from_source}_df['{relationship.keys["from"]}'] == {relationship.to_source}_df['{relationship.keys["to"]}'],
+                        "{relationship.relationship_type}"
                     )
+                    """
                 )
-            else:
-                # Use default silver layer transformations
-                data = pd.DataFrame(state.bronze_data["data"])
-                state.silver_data = {
-                    "data": data.to_dict(),
-                    "metadata": {
-                        "timestamp": datetime.now().isoformat(),
-                        "source": state.bronze_data["metadata"]
-                    }
-                }
+            )
             
-            # Ensure all required fields are written
-            state.messages = state.messages or []
-            state.error = None
-            state.completed = True
-            state.source = state.source
-            state.target_schema = state.target_schema
-            state.transformation_steps = state.transformation_steps or []
-            state.bronze_data = state.bronze_data or {}
-            state.silver_data = state.silver_data or {}
-            state.gold_data = state.gold_data or {}
-            state.validation_results = state.validation_results or {}
-            state.execution_time = 0.0
-            
-            state.messages.append("Silver layer creation completed")
-            return {"state": state}
         except Exception as e:
-            state.error = str(e)
-            state.messages.append(f"Silver layer creation failed: {str(e)}")
-            return {"state": state}
+            logger.error(f"Error applying relationship transformation: {str(e)}")
+            raise
 
-    async def _create_gold_layer(self, state: TransformerState) -> Dict[str, Any]:
-        """Create gold layer transformations."""
-        logger.info("Creating gold layer...")
+    async def _validate_results(self, state: TransformerState) -> Dict[str, Any]:
+        """Validate transformation results."""
         try:
-            if self.code:
-                # Use LLM-generated code for gold layer
-                request = CodeGenerationRequest(
-                    task="Create gold layer transformations",
-                    context={
-                        "source_type": state.source.type,
-                        "silver_data": state.silver_data,
-                        "target_schema": state.target_schema
-                    },
-                    requirements=[
-                        "Business logic application",
-                        "Feature engineering",
-                        "Data aggregation",
-                        "Final validation"
-                    ],
-                    constraints=[
-                        "Handle large datasets",
-                        "Memory efficient",
-                        "Optimize for analytics"
-                    ]
-                )
-                response = await self.llm_agent.generate_code(request)
-                # Execute generated code
-                exec(response.code, globals(), locals())
-                state.gold_data = locals().get("gold_data", {})
-                state.transformation_steps.append(
-                    TransformationStep(
-                        name="gold_layer",
-                        description="Business logic application",
-                        code=response.code,
-                        dependencies=["silver_layer"]
-                    )
-                )
-            else:
-                # Use default gold layer transformations
-                data = pd.DataFrame(state.silver_data["data"])
-                state.gold_data = {
-                    "data": data.to_dict(),
-                    "metadata": {
-                        "timestamp": datetime.now().isoformat(),
-                        "source": state.silver_data["metadata"]
-                    }
-                }
+            validation_results = {}
             
-            # Ensure all required fields are written
-            state.messages = state.messages or []
-            state.error = None
-            state.completed = True
-            state.source = state.source
-            state.target_schema = state.target_schema
-            state.transformation_steps = state.transformation_steps or []
-            state.bronze_data = state.bronze_data or {}
-            state.silver_data = state.silver_data or {}
-            state.gold_data = state.gold_data or {}
-            state.validation_results = state.validation_results or {}
-            state.execution_time = 0.0
+            # Validate bronze layer
+            if not state.bronze_data:
+                raise ValueError("No data found in bronze layer")
+                
+            # Validate silver layer
+            if not state.silver_data:
+                raise ValueError("No data found in silver layer")
+                
+            # Validate gold layer
+            if state.target_schema and not state.gold_data.get("final"):
+                raise ValueError("No data found in gold layer")
+                
+            validation_results["status"] = "success"
+            validation_results["message"] = "All validations passed"
             
-            state.messages.append("Gold layer creation completed")
-            return {"state": state}
+            return validation_results
+            
         except Exception as e:
-            state.error = str(e)
-            state.messages.append(f"Gold layer creation failed: {str(e)}")
-            return {"state": state}
-
-    async def _validate_transformations(self, state: TransformerState) -> Dict[str, Any]:
-        """Validate the transformations."""
-        logger.info("Validating transformations...")
-        try:
-            if self.code:
-                # Use LLM-generated code for validation
-                request = CodeGenerationRequest(
-                    task="Validate transformations",
-                    context={
-                        "source_type": state.source.type,
-                        "bronze_data": state.bronze_data,
-                        "silver_data": state.silver_data,
-                        "gold_data": state.gold_data,
-                        "target_schema": state.target_schema
-                    },
-                    requirements=[
-                        "Schema validation",
-                        "Data quality checks",
-                        "Business rule validation",
-                        "Performance metrics"
-                    ],
-                    constraints=[
-                        "Handle large datasets",
-                        "Memory efficient",
-                        "Comprehensive validation"
-                    ]
-                )
-                response = await self.llm_agent.generate_code(request)
-                # Execute generated code
-                exec(response.code, globals(), locals())
-                state.validation_results = locals().get("validation_results", {})
-            else:
-                # Use default validation
-                state.validation_results = {
-                    "bronze_layer": {
-                        "row_count": len(pd.DataFrame(state.bronze_data["data"])),
-                        "completeness": 1.0,
-                        "success": True
-                    },
-                    "silver_layer": {
-                        "row_count": len(pd.DataFrame(state.silver_data["data"])),
-                        "completeness": 1.0,
-                        "success": True
-                    },
-                    "gold_layer": {
-                        "row_count": len(pd.DataFrame(state.gold_data["data"])),
-                        "completeness": 1.0,
-                        "success": True
-                    }
-                }
-            
-            # Ensure all required fields are written
-            state.messages = state.messages or []
-            state.error = None
-            state.completed = True
-            state.source = state.source
-            state.target_schema = state.target_schema
-            state.transformation_steps = state.transformation_steps or []
-            state.bronze_data = state.bronze_data or {}
-            state.silver_data = state.silver_data or {}
-            state.gold_data = state.gold_data or {}
-            state.validation_results = state.validation_results or {}
-            state.execution_time = 0.0
-            
-            state.messages.append("Transformation validation completed")
-            return {"state": state}
-        except Exception as e:
-            state.error = str(e)
-            state.messages.append(f"Transformation validation failed: {str(e)}")
-            return {"state": state} 
+            logger.error(f"Error validating results: {str(e)}")
+            raise 
