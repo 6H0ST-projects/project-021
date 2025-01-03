@@ -51,7 +51,7 @@ class CodeGenerationPreset(str, Enum):
 
 class LLMConfig(BaseModel):
     """LLM-specific configuration."""
-    model: str = "gpt-4-turbo-preview"
+    model: str = "gpt-4o"
     temperature: float = 0.2
     max_tokens: int = 4000
     max_retries: int = 3

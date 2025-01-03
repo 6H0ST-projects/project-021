@@ -64,9 +64,9 @@ class Pipeline:
         Build the LangGraph pipeline graph.
         """
         # Initialize agents
-        analyzer = DataAnalyzer(code=self.analyzer_code)
-        transformer = TransformationDesigner(code=self.transformer_code)
-        tester = TestingAgent(code=self.tester_code)
+        analyzer = DataAnalyzer(config={"code": self.analyzer_code} if self.analyzer_code else None)
+        transformer = TransformationDesigner(config={"code": self.transformer_code} if self.transformer_code else None)
+        tester = TestingAgent(config={"code": self.tester_code} if self.tester_code else None)
         
         # Create the graph
         workflow = StateGraph(PipelineState)
@@ -159,8 +159,17 @@ class Pipeline:
                 self._graph = self._build_graph()
             
             # Initialize all states with required fields
+            file_patterns = (
+                self.source.options.get("file_patterns", [])
+                if self.source.options
+                else self.source.file_patterns
+                if hasattr(self.source, "file_patterns")
+                else ["*.json", "*.csv", "*.parquet"]
+            )
+            
             analyzer_state = AnalyzerState(
-                source=self.source,
+                source_directory=self.source.location,
+                file_patterns=file_patterns,
                 messages=[],
                 error=None,
                 completed=False,

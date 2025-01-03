@@ -47,15 +47,15 @@ class TesterState(BaseAgentState):
 class TestingAgent(BaseAgent[TesterState]):
     """Agent for testing data transformations."""
     
-    def __init__(self, code: Optional[str] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
         Initialize the tester agent.
         
         Args:
-            code: LLM-generated code for custom tests
+            config: Configuration dictionary that may contain LLM-generated code
         """
-        super().__init__()
-        self.code = code
+        super().__init__(config)
+        self.code = config.get("code") if config else None
         self.llm_agent = DataEngineeringAgent()
         
     async def run(self, state: TesterState) -> TesterState:

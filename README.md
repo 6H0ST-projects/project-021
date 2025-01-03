@@ -111,7 +111,7 @@ Create or modify test configurations in `tests/config/test_config.json`:
     "max_cpu_percent": 80.0,
     "timeout_seconds": 300,
     "llm_config": {
-        "model": "gpt-4-turbo-preview",
+        "model": "gpt-4o",
         "temperature": 0.2,
         "max_tokens": 4000,
         "max_retries": 3

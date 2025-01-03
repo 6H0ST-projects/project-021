@@ -25,12 +25,26 @@ def analyze_column_pattern(series: pd.Series) -> Dict[str, Any]:
     Returns:
         Dictionary containing pattern information
     """
+    # Handle empty series
+    if series.empty:
+        return {
+            "type": str(series.dtype),
+            "unique_count": 0,
+            "null_count": 0,
+            "total_count": 0,
+            "sample_values": []
+        }
+    
+    # Get non-null values for sampling
+    non_null_series = series.dropna()
+    sample_size = min(5, len(non_null_series))
+    
     pattern = {
         "type": str(series.dtype),
         "unique_count": series.nunique(),
         "null_count": series.isnull().sum(),
         "total_count": len(series),
-        "sample_values": series.dropna().sample(min(5, len(series))).tolist()
+        "sample_values": non_null_series.sample(n=sample_size, replace=True).tolist() if sample_size > 0 else []
     }
     
     # Detect numerical patterns

@@ -85,6 +85,50 @@ def generate_test_data(
             source_data = pd.read_csv(source.location)
         else:
             raise ValueError(f"Unsupported file format: {source.format}")
+    elif source.type == "directory":
+        # For directory sources, we'll use the file patterns from source configuration
+        import glob
+        import os
+        
+        # Get file patterns from source config
+        patterns = source.file_patterns if hasattr(source, "file_patterns") else ["*.json", "*.csv", "*.parquet"]
+        
+        # Find all matching files
+        all_files = []
+        for pattern in patterns:
+            search_pattern = os.path.join(source.location, "**", pattern)
+            all_files.extend(glob.glob(search_pattern, recursive=True))
+        
+        if not all_files:
+            raise ValueError(f"No files found matching patterns: {patterns} in {source.location}")
+        
+        # Load and combine data from all matching files
+        dfs = []
+        for file in all_files:
+            file_format = Path(file).suffix.lstrip('.')
+            try:
+                if file_format == "json":
+                    with open(file) as f:
+                        json_data = json.load(f)
+                    if isinstance(json_data, dict):
+                        for key, value in json_data.items():
+                            if isinstance(value, list):
+                                json_data = value
+                                break
+                    dfs.append(pd.DataFrame(json_data))
+                elif file_format == "parquet":
+                    dfs.append(pd.read_parquet(file))
+                elif file_format == "csv":
+                    dfs.append(pd.read_csv(file))
+                logger.info(f"Loaded data from {file}")
+            except Exception as e:
+                logger.warning(f"Failed to load {file}: {str(e)}")
+                continue
+        
+        if not dfs:
+            raise ValueError(f"No valid data files found in directory: {source.location}")
+        
+        source_data = pd.concat(dfs, ignore_index=True)
     else:
         raise ValueError(f"Unsupported source type: {source.type}")
     
