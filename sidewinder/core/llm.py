@@ -165,119 +165,299 @@ class LLMCodeGenerator:
             logger.error(f"Code generation failed: {str(e)}")
             raise
 
+class TransformationCode(BaseModel):
+    """Container for transformation code across layers."""
+    bronze_layer: str
+    silver_layer: str
+    gold_layer: str
+    analyzer_findings: Dict[str, Any]
+
+
 class DataEngineeringAgent:
-    """Agent for generating data engineering code."""
+    """LLM-powered data engineering agent."""
     
     def __init__(self):
-        """Initialize the agent."""
-        self.generator = LLMCodeGenerator()
-        
+        self.llm = LLMCodeGenerator()
+    
     async def generate_analyzer_code(
         self,
         source_type: str,
         source_data: str
-    ) -> str:
-        """Generate code for data analysis."""
-        try:
-            code = await self.generator.generate_code(
-                task="Generate data analyzer code",
-                context={
-                    "source_type": source_type,
-                    "source_data": source_data
-                },
-                requirements=[
-                    "Define analyze_data function that uses Spark SQL for efficient data profiling",
-                    "Analyze data skew and distribution patterns using window functions",
-                    "Recommend optimal partitioning strategy based on data distribution",
-                    "Profile memory usage and data size per partition",
-                    "Use Spark SQL execution plans for optimization",
-                    "Implement memory-efficient window functions",
-                    "Add performance logging and metrics"
-                ],
-                constraints=[
-                    "Function must be named exactly 'analyze_data'",
-                    "Must use Spark SQL for all data operations",
-                    "Implement memory-efficient window functions",
-                    "Add performance logging and metrics",
-                    "Return a dictionary with analysis results"
-                ]
-            )
-            return code
-        except Exception as e:
-            logger.error(f"Analyzer code generation failed: {str(e)}")
-            raise
-            
+    ) -> Dict[str, Any]:
+        """Generate code to analyze the source data."""
+        prompt = self._create_analyzer_prompt(source_type, source_data)
+        response = await self.llm.generate_code(
+            task="Generate data analyzer code",
+            context={
+                "source_type": source_type,
+                "source_data": source_data
+            },
+            requirements=[
+                "Analyze data types and patterns",
+                "Identify data quality issues",
+                "Detect relationships between data sources",
+                "Calculate basic statistics",
+                "Provide transformation recommendations"
+            ]
+        )
+        return self._parse_analyzer_response(response)
+    
     async def generate_transformer_code(
         self,
         source_type: str,
         source_data: str,
+        analyzer_output: Dict[str, Any],
         target_schema: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """Generate code for data transformation."""
-        try:
-            code = await self.generator.generate_code(
-                task="Generate data transformer code",
-                context={
-                    "source_type": source_type,
-                    "source_data": source_data,
-                    "target_schema": target_schema
-                },
-                requirements=[
-                    "Define transform_data function using Spark SQL optimizations",
-                    "Implement efficient joins and aggregations",
-                    "Apply partitioning strategy for better parallelism",
-                    "Cache frequently used intermediate results",
-                    "Use broadcast joins for small lookup tables",
-                    "Implement bucketing for large joins",
-                    "Monitor and log query execution plans"
-                ],
-                constraints=[
-                    "Function must be named exactly 'transform_data'",
-                    "Must use Spark SQL for all data operations",
-                    "Use broadcast joins for small lookup tables",
-                    "Implement bucketing for large joins",
-                    "Monitor and log query execution plans"
-                ]
-            )
-            return code
-        except Exception as e:
-            logger.error(f"Transformer code generation failed: {str(e)}")
-            raise
-            
+    ) -> TransformationCode:
+        """Generate transformation code for all layers."""
+        # Generate bronze layer code
+        bronze_code = await self.llm.generate_code(
+            task="Generate bronze layer ETL code",
+            context={
+                "source_type": source_type,
+                "source_data": source_data,
+                "analyzer_output": analyzer_output
+            },
+            requirements=[
+                "Ingest raw data with minimal transformations",
+                "Preserve original data",
+                "Add metadata columns",
+                "Handle basic error cases"
+            ]
+        )
+        
+        # Generate silver layer code
+        silver_code = await self.llm.generate_code(
+            task="Generate silver layer ETL code",
+            context={
+                "source_type": source_type,
+                "source_data": source_data,
+                "analyzer_output": analyzer_output,
+                "bronze_code": bronze_code
+            },
+            requirements=[
+                "Clean and standardize data",
+                "Handle data quality issues",
+                "Implement efficient joins",
+                "Apply data engineering best practices",
+                "Create normalized data model"
+            ]
+        )
+        
+        # Generate gold layer code
+        gold_code = await self.llm.generate_code(
+            task="Generate gold layer ETL code",
+            context={
+                "source_type": source_type,
+                "source_data": source_data,
+                "analyzer_output": analyzer_output,
+                "silver_code": silver_code,
+                "target_schema": target_schema
+            },
+            requirements=[
+                "Create final data model",
+                "Implement feature engineering",
+                "Ensure high query performance",
+                "Apply business logic and aggregations",
+                "Validate final output"
+            ]
+        )
+        
+        return TransformationCode(
+            bronze_layer=bronze_code,
+            silver_layer=silver_code,
+            gold_layer=gold_code,
+            analyzer_findings=analyzer_output
+        )
+    
     async def generate_tester_code(
         self,
         source_type: str,
         source_data: str,
+        transformation_code: TransformationCode,
         target_schema: Optional[Dict[str, Any]] = None,
-        test_types: Optional[List[Dict[str, Any]]] = None
+        test_types: List[str] = []
     ) -> str:
-        """Generate code for data testing."""
+        """Generate code to test the transformations."""
+        return await self.llm.generate_code(
+            task="Generate test code",
+            context={
+                "source_type": source_type,
+                "source_data": source_data,
+                "transformation_code": transformation_code.model_dump(),
+                "target_schema": target_schema,
+                "test_types": test_types
+            },
+            requirements=[
+                "Evaluate join performance",
+                "Validate data engineering practices",
+                "Check data quality",
+                "Verify schema compliance",
+                "Run user-specified tests"
+            ]
+        )
+    
+    def _create_analyzer_prompt(self, source_type: str, source_data: str) -> str:
+        """Create prompt for data analysis."""
+        return f"""Analyze the following {source_type} data and provide detailed information about:
+1. Data types and patterns for each field
+2. Data quality issues (nulls, duplicates, inconsistencies)
+3. Relationships between data sources
+4. Basic statistics (counts, distributions, etc.)
+5. Recommendations for cleaning and transformation
+
+Data:
+{source_data}
+
+Return the analysis as a structured dictionary with the above categories.
+"""
+    
+    def _create_bronze_layer_prompt(
+        self,
+        source_type: str,
+        source_data: str,
+        analyzer_output: Dict[str, Any]
+    ) -> str:
+        """Create prompt for bronze layer transformation."""
+        return f"""Generate code for the bronze layer ETL pipeline.
+The bronze layer should:
+1. Ingest raw data with minimal transformations
+2. Preserve the original data as much as possible
+3. Add metadata columns (load_time, source_file, etc.)
+4. Handle basic error cases
+
+Source Type: {source_type}
+Analyzer Findings: {json.dumps(analyzer_output, indent=2)}
+
+Sample Data:
+{source_data}
+
+Return only the code for the bronze layer transformation.
+"""
+    
+    def _create_silver_layer_prompt(
+        self,
+        source_type: str,
+        source_data: str,
+        analyzer_output: Dict[str, Any],
+        bronze_code: str
+    ) -> str:
+        """Create prompt for silver layer transformation."""
+        return f"""Generate code for the silver layer ETL pipeline.
+The silver layer should:
+1. Clean and standardize data
+2. Handle data quality issues identified by the analyzer
+3. Implement efficient join strategies
+4. Apply data engineering best practices
+5. Create a normalized data model
+
+Source Type: {source_type}
+Analyzer Findings: {json.dumps(analyzer_output, indent=2)}
+Bronze Layer Code: {bronze_code}
+
+Sample Data:
+{source_data}
+
+Return only the code for the silver layer transformation.
+"""
+    
+    def _create_gold_layer_prompt(
+        self,
+        source_type: str,
+        source_data: str,
+        analyzer_output: Dict[str, Any],
+        silver_code: str,
+        target_schema: Optional[Dict[str, Any]]
+    ) -> str:
+        """Create prompt for gold layer transformation."""
+        schema_text = "using the provided schema" if target_schema else "by engineering relevant features"
+        return f"""Generate code for the gold layer ETL pipeline.
+The gold layer should:
+1. Create the final data model {schema_text}
+2. Implement feature engineering
+3. Ensure high query performance
+4. Apply business logic and aggregations
+5. Validate final output
+
+Source Type: {source_type}
+Analyzer Findings: {json.dumps(analyzer_output, indent=2)}
+Silver Layer Code: {silver_code}
+Target Schema: {json.dumps(target_schema, indent=2) if target_schema else "Not specified - engineer relevant features"}
+
+Sample Data:
+{source_data}
+
+Return only the code for the gold layer transformation.
+"""
+    
+    def _create_tester_prompt(
+        self,
+        source_type: str,
+        source_data: str,
+        transformation_code: TransformationCode,
+        target_schema: Optional[Dict[str, Any]],
+        test_types: List[str]
+    ) -> str:
+        """Create prompt for test generation."""
+        return f"""Generate comprehensive tests for the ETL pipeline.
+Tests should cover:
+1. Join performance evaluation
+2. Data engineering best practices validation
+3. Data quality checks
+4. Schema compliance
+5. User-specified tests: {', '.join(test_types) if test_types else 'None specified'}
+
+Source Type: {source_type}
+Transformation Code:
+Bronze Layer:
+{transformation_code.bronze_layer}
+
+Silver Layer:
+{transformation_code.silver_layer}
+
+Gold Layer:
+{transformation_code.gold_layer}
+
+Target Schema: {json.dumps(target_schema, indent=2) if target_schema else "Not specified"}
+Analyzer Findings: {json.dumps(transformation_code.analyzer_findings, indent=2)}
+
+Sample Data:
+{source_data}
+
+Return the test code that validates all aspects of the transformation pipeline.
+"""
+    
+    def _parse_analyzer_response(self, response: str) -> Dict[str, Any]:
+        """Parse the analyzer's response into a structured format."""
         try:
-            code = await self.generator.generate_code(
-                task="Generate data tester code",
-                context={
-                    "source_type": source_type,
-                    "source_data": source_data,
-                    "target_schema": target_schema,
-                    "test_types": test_types
-                },
-                requirements=[
-                    "Define test_data function for performance validation",
-                    "Measure query execution times and resource usage",
-                    "Validate data quality and completeness",
-                    "Generate performance optimization recommendations",
-                    "Use Spark SQL execution plans for analysis",
-                    "Implement metrics collection with minimal overhead",
-                    "Add detailed performance logging"
-                ],
-                constraints=[
-                    "Function must be named exactly 'test_data'",
-                    "Must use Spark SQL execution plans for analysis",
-                    "Implement metrics collection with minimal overhead",
-                    "Add detailed performance logging"
-                ]
-            )
-            return code
-        except Exception as e:
-            logger.error(f"Tester code generation failed: {str(e)}")
-            raise 
+            return json.loads(response)
+        except json.JSONDecodeError:
+            # If the response isn't valid JSON, try to extract structured data
+            # This is a simplified version - you might want to add more robust parsing
+            sections = {
+                "data_types": {},
+                "quality_issues": [],
+                "relationships": [],
+                "statistics": {},
+                "recommendations": []
+            }
+            
+            current_section = None
+            for line in response.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                if line.endswith(":"):
+                    current_section = line[:-1].lower().replace(" ", "_")
+                    continue
+                
+                if current_section:
+                    if isinstance(sections.get(current_section), list):
+                        sections[current_section].append(line)
+                    elif isinstance(sections.get(current_section), dict):
+                        if ":" in line:
+                            key, value = line.split(":", 1)
+                            sections[current_section][key.strip()] = value.strip()
+            
+            return sections 

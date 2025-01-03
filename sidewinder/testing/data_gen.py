@@ -188,3 +188,57 @@ def load_test_data(data_path: Union[str, Path]) -> pd.DataFrame:
     
     logger.info(f"Loaded test data from {data_path}")
     return data 
+
+
+def generate_scalability_test_data(
+    source: Source,
+    scale_factors: List[int],
+    base_size: int = 1000,
+    seed: Optional[int] = None
+) -> Dict[int, pd.DataFrame]:
+    """
+    Generate test data at different scales for scalability testing.
+    
+    Args:
+        source: Source configuration
+        scale_factors: List of scale multipliers (e.g., [1, 10, 100])
+        base_size: Base number of rows (default: 1000)
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary mapping scale factors to DataFrames
+    """
+    if seed is not None:
+        np.random.seed(seed)
+        fake.seed_instance(seed)
+    
+    # First generate base data to analyze patterns
+    base_data = generate_test_data(source)
+    patterns = infer_data_patterns(base_data)
+    
+    # Generate data for each scale factor
+    scaled_data = {}
+    for scale in scale_factors:
+        size = base_size * scale
+        logger.info(f"Generating test data at scale {scale}x ({size} rows)...")
+        
+        # Generate data for each column using the same patterns
+        data = {}
+        for column, pattern in patterns.items():
+            data[column] = generate_column_data(pattern, size, seed=seed)
+            
+            # If there are relationships, maintain them at scale
+            if "relationships" in pattern:
+                for rel in pattern["relationships"]:
+                    related_col = generate_related_data(
+                        base_data=base_data,
+                        relationship=rel,
+                        size=size,
+                        seed=seed
+                    )
+                    data[f"{column}_related_{rel['type']}"] = related_col
+        
+        scaled_data[scale] = pd.DataFrame(data)
+        logger.info(f"Generated {size} rows of test data")
+    
+    return scaled_data 
