@@ -18,6 +18,10 @@ class TransformerState:
     messages: List[str] = field(default_factory=list)
     error: Optional[str] = None
     completed: bool = False
+    source_directory: str = ""
+    file_patterns: List[str] = field(default_factory=list)
+    discovered_sources: Dict[str, Any] = field(default_factory=dict)
+    inferred_relationships: Dict[str, Any] = field(default_factory=dict)
     transformation_steps: List[Dict[str, Any]] = field(default_factory=list)
     bronze_data: Dict[str, Any] = field(default_factory=dict)
     silver_data: Dict[str, Any] = field(default_factory=dict)

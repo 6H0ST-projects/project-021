@@ -181,8 +181,10 @@ class Pipeline:
                 execution_time=0.0
             )
             transformer_state = TransformerState(
-                source=self.source,
-                target_schema=self.target.target_schema,
+                source_directory=self.source.location,
+                file_patterns=file_patterns,
+                discovered_sources={},
+                inferred_relationships=[],
                 messages=[],
                 error=None,
                 completed=False,

@@ -107,7 +107,13 @@ class LLMCodeGenerator:
                           "IMPORTANT: Make sure to implement the exact function name as specified in the context.\n"
                           "IMPORTANT: Your code must include:\n"
                           "1. The required function with the exact name\n"
-                          "2. Use of pandas DataFrame for data manipulation\n"
+                          "2. Use of Spark SQL for data manipulation with these specific features:\n"
+                          "   - Import pyspark.sql.functions as F\n"
+                          "   - Use DataFrame.explain() for query plans\n"
+                          "   - Use broadcast hints for small tables\n"
+                          "   - Use window functions efficiently\n"
+                          "   - Cache intermediate results with df.cache()\n"
+                          "   - Monitor performance with spark.sparkContext.statusTracker()\n"
                           "3. Proper function signature with type hints\n"
                           "4. Error handling with try/except\n"
                           "5. Logging for important steps\n"
@@ -117,12 +123,16 @@ class LLMCodeGenerator:
                          "Constraints:\n{constraints_str}\n"
                          "Context:\n{context_str}\n\n"
                          "Generate the code following these guidelines:\n"
-                         "1. Include necessary imports\n"
+                         "1. Include necessary imports (especially pyspark.sql.functions)\n"
                          "2. Add comprehensive docstrings\n"
                          "3. Implement proper error handling\n"
                          "4. Add type hints\n"
                          "5. Include logging\n"
-                         "6. Use pandas for all data transformations\n"
+                         "6. Use Spark SQL for all data transformations with:\n"
+                         "   - DataFrame operations\n"
+                         "   - Window functions\n"
+                         "   - Query plan analysis\n"
+                         "   - Performance monitoring\n"
                          "7. Follow PEP 8 style guidelines\n\n"
                          "Remember to wrap your code in ```python and ``` markers.\n"
                          "Remember to implement the exact function name as specified in the context.")
@@ -176,16 +186,20 @@ class DataEngineeringAgent:
                     "source_data": source_data
                 },
                 requirements=[
-                    "Define analyze_data function that takes a source_data parameter",
-                    "Use pandas DataFrame for data processing",
-                    "Return a dictionary containing analysis results",
-                    "Include schema detection, data quality metrics, and patterns"
+                    "Define analyze_data function that uses Spark SQL for efficient data profiling",
+                    "Analyze data skew and distribution patterns using window functions",
+                    "Recommend optimal partitioning strategy based on data distribution",
+                    "Profile memory usage and data size per partition",
+                    "Use Spark SQL execution plans for optimization",
+                    "Implement memory-efficient window functions",
+                    "Add performance logging and metrics"
                 ],
                 constraints=[
                     "Function must be named exactly 'analyze_data'",
-                    "Must use pd.DataFrame for data processing",
-                    "Include proper error handling",
-                    "Add logging for important steps"
+                    "Must use Spark SQL for all data operations",
+                    "Implement memory-efficient window functions",
+                    "Add performance logging and metrics",
+                    "Return a dictionary with analysis results"
                 ]
             )
             return code
@@ -209,16 +223,20 @@ class DataEngineeringAgent:
                     "target_schema": target_schema
                 },
                 requirements=[
-                    "Define transform_data function that takes source_data parameter",
-                    "Use pandas DataFrame for data processing",
-                    "Apply transformations according to target schema",
-                    "Return transformed DataFrame"
+                    "Define transform_data function using Spark SQL optimizations",
+                    "Implement efficient joins and aggregations",
+                    "Apply partitioning strategy for better parallelism",
+                    "Cache frequently used intermediate results",
+                    "Use broadcast joins for small lookup tables",
+                    "Implement bucketing for large joins",
+                    "Monitor and log query execution plans"
                 ],
                 constraints=[
                     "Function must be named exactly 'transform_data'",
-                    "Must use pd.DataFrame for data processing",
-                    "Include proper error handling",
-                    "Add logging for important steps"
+                    "Must use Spark SQL for all data operations",
+                    "Use broadcast joins for small lookup tables",
+                    "Implement bucketing for large joins",
+                    "Monitor and log query execution plans"
                 ]
             )
             return code
@@ -244,16 +262,19 @@ class DataEngineeringAgent:
                     "test_types": test_types
                 },
                 requirements=[
-                    "Define test_data function that takes source_data parameter",
-                    "Use pandas DataFrame for data validation",
-                    "Implement all specified test types",
-                    "Return test results dictionary"
+                    "Define test_data function for performance validation",
+                    "Measure query execution times and resource usage",
+                    "Validate data quality and completeness",
+                    "Generate performance optimization recommendations",
+                    "Use Spark SQL execution plans for analysis",
+                    "Implement metrics collection with minimal overhead",
+                    "Add detailed performance logging"
                 ],
                 constraints=[
                     "Function must be named exactly 'test_data'",
-                    "Must use pd.DataFrame for data processing",
-                    "Include proper error handling",
-                    "Add logging for important steps"
+                    "Must use Spark SQL execution plans for analysis",
+                    "Implement metrics collection with minimal overhead",
+                    "Add detailed performance logging"
                 ]
             )
             return code
