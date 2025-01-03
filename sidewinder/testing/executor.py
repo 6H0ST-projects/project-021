@@ -1,20 +1,102 @@
 """
-Test executor for running tests based on configuration.
+Test execution environment for Sidewinder.
 """
 
-from typing import List, Dict, Any
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import logging
 import json
 from pathlib import Path
-import ast
+from typing import Dict, Any, List, Optional
+import time
+import asyncio
+from pydantic import BaseModel, Field
+from pyspark.sql import SparkSession
+import numpy as np
 
-from sidewinder.core.test_config import GlobalTestConfig, TestConfig, TestType
-from sidewinder.testing.environment import TestEnvironment, TestContext
-from sidewinder.testing.registry import registry
-from sidewinder.testing.reporting import TestReport, TestResult, TestSuiteResult
-from sidewinder.core.llm import DataEngineeringAgent, LLMCodeGenerator
+from sidewinder.core.config import Source, Target
+from sidewinder.core.pipeline import Pipeline
+from sidewinder.core.llm import LLMCodeGenerator
+from sidewinder.testing.metrics import PerformanceMetrics
+
+# Initialize Spark session for local mode
+spark = SparkSession.builder \
+    .master("local[*]") \
+    .appName("SidewinderTests") \
+    .config("spark.driver.memory", "4g") \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+    .getOrCreate()
+
+
+class GlobalTestConfig(BaseModel):
+    """Global test configuration."""
+    environment: str
+    output_dir: str
+    max_parallel_tests: int = 4
+    max_parallel_suites: int = 2
+    max_memory_gb: float = 4.0
+    max_cpu_percent: float = 80.0
+    timeout_seconds: int = 300
+    llm_config: Optional[Dict[str, Any]] = None
+    scenarios: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class TestResult(BaseModel):
+    """Result of a single test."""
+    success: bool
+    test_name: str
+    duration_seconds: float
+    memory_usage_gb: float
+    cpu_percent: float
+    error_message: Optional[str] = None
+    metrics: Optional[Dict[str, Any]] = None
+
+
+class TestSuiteResult(BaseModel):
+    """Result of a test suite."""
+    suite_name: str
+    results: List[TestResult]
+    total_duration_seconds: float
+    peak_memory_gb: float
+    avg_cpu_percent: float
+    success_rate: float
+
+
+class TestReport(BaseModel):
+    """Complete test execution report."""
+    suites: List[TestSuiteResult]
+
+
+class TestContext:
+    """Context for test execution."""
+    
+    def __init__(self, config: GlobalTestConfig):
+        self.config = config
+        self.start_time = time.time()
+        self.metrics = {}
+        
+    def monitor_resources(self) -> Dict[str, float]:
+        """Monitor resource usage."""
+        import psutil
+        
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        
+        return {
+            "elapsed_seconds": time.time() - self.start_time,
+            "memory_gb": memory_info.rss / (1024 * 1024 * 1024),
+            "cpu_percent": process.cpu_percent()
+        }
+        
+    def load_data(self, path: str) -> "pyspark.sql.DataFrame":
+        """Load test data."""
+        if path.endswith(".json"):
+            return spark.read.json(path)
+        elif path.endswith(".parquet"):
+            return spark.read.parquet(path)
+        elif path.endswith(".csv"):
+            return spark.read.csv(path, header=True, inferSchema=True)
+        else:
+            raise ValueError(f"Unsupported file format: {path}")
 
 
 class TestExecutor:
@@ -22,212 +104,127 @@ class TestExecutor:
     
     def __init__(self, config: GlobalTestConfig):
         self.config = config
-        self.environment = TestEnvironment(
-            spark_config={
-                "spark.sql.execution.arrow.pyspark.enabled": "true",
-                "spark.sql.execution.arrow.maxRecordsPerBatch": "10000",
-                "spark.sql.shuffle.partitions": "200",
-                "spark.default.parallelism": "100",
-                "spark.driver.memory": "8g",
-                "spark.executor.memory": "16g"
-            },
-            max_memory_gb=config.max_memory_gb,
-            max_cpu_percent=config.max_cpu_percent,
-            timeout_seconds=config.timeout_seconds
-        )
+        self.environment = TestContext(config)
         self.logger = logging.getLogger("sidewinder.testing")
         
         # Initialize LLM agents
-        self.llm_config = config.llm_config
+        self.llm_config = config.llm_config or {}
         self.llm_generator = LLMCodeGenerator(
-            model=self.llm_config.model if self.llm_config else "gpt-4-turbo-preview",
-            temperature=self.llm_config.temperature if self.llm_config else 0.2,
-            max_tokens=self.llm_config.max_tokens if self.llm_config else 4000,
-            max_retries=self.llm_config.max_retries if self.llm_config else 3
+            model=self.llm_config.get("model", "gpt-4o"),
+            temperature=self.llm_config.get("temperature", 0.2),
+            max_tokens=self.llm_config.get("max_tokens", 4000),
+            max_retries=self.llm_config.get("max_retries", 3)
         )
-        self.data_engineering_agent = DataEngineeringAgent()
-    
-    def _build_dependency_graph(self) -> Dict[str, List[str]]:
-        """Build graph of test dependencies."""
-        return {
-            test.name: test.dependencies
-            for test in self.config.tests
-            if test.enabled
-        }
-    
-    def _get_ready_tests(
-        self,
-        graph: Dict[str, List[str]],
-        completed: set
-    ) -> List[str]:
-        """Get tests that are ready to run."""
-        ready = []
-        for test_name, deps in graph.items():
-            if test_name not in completed and all(d in completed for d in deps):
-                ready.append(test_name)
-        return ready
-    
+        
     async def run_tests(self) -> TestReport:
-        """Run all enabled tests."""
-        # Build dependency graph
-        graph = self._build_dependency_graph()
-        completed = set()
-        results: List[TestResult] = []
-        
-        # Create thread pool
-        executor = ThreadPoolExecutor(max_workers=self.config.max_parallel_tests)
-        loop = asyncio.get_event_loop()
-        
-        while len(completed) < len(graph):
-            # Get tests that are ready to run
-            ready_tests = self._get_ready_tests(graph, completed)
+        """Run all tests."""
+        try:
+            # Create test suites
+            suites = []
+            for scenario in self.config.scenarios:
+                suite_result = await self._run_test_suite(scenario)
+                suites.append(suite_result)
             
-            if not ready_tests:
-                raise RuntimeError("Circular dependency detected in test configuration")
+            return TestReport(suites=suites)
             
-            # Run ready tests in parallel
+        except Exception as e:
+            self.logger.error(f"Test execution failed: {str(e)}")
+            raise
+            
+    async def _run_test_suite(self, scenario: Dict[str, Any]) -> TestSuiteResult:
+        """Run a test suite."""
+        try:
+            # Run tests in parallel
             tasks = []
-            for test_name in ready_tests:
-                test_config = next(
-                    t for t in self.config.tests
-                    if t.name == test_name and t.enabled
-                )
+            for test_config in scenario["tests"]:
+                task = asyncio.create_task(self._run_single_test(test_config))
+                tasks.append(task)
                 
-                task = loop.run_in_executor(
-                    executor,
-                    self._run_single_test,
-                    test_config
-                )
-                tasks.append((test_name, task))
+                # Limit parallel tests
+                if len(tasks) >= self.config.max_parallel_tests:
+                    await asyncio.gather(*tasks)
+                    tasks = []
             
-            # Wait for all tasks to complete
-            for test_name, task in tasks:
-                try:
-                    result = await task
-                    results.append(result)
-                    completed.add(test_name)
-                    
-                except Exception as e:
-                    self.logger.error(f"Test {test_name} failed: {str(e)}")
-                    results.append(
-                        TestResult(
-                            success=False,
-                            test_name=test_name,
-                            duration_seconds=0,
-                            memory_usage_gb=0,
-                            cpu_percent=0,
-                            error_message=str(e)
-                        )
-                    )
-                    completed.add(test_name)
+            # Wait for remaining tests
+            if tasks:
+                await asyncio.gather(*tasks)
             
-        # Create test suite result
-        suite_result = TestSuiteResult(
-            suite_name=f"Sidewinder Tests - {self.config.environment}",
-            results=results,
-            total_duration_seconds=sum(r.duration_seconds for r in results),
-            peak_memory_gb=max(r.memory_usage_gb for r in results),
-            avg_cpu_percent=sum(r.cpu_percent for r in results) / len(results),
-            success_rate=len([r for r in results if r.success]) / len(results)
-        )
-        
-        return TestReport([suite_result])
-    
-    def _run_single_test(self, test_config: TestConfig) -> TestResult:
+            # Create test suite result
+            results = [task.result() for task in tasks]
+            
+            return TestSuiteResult(
+                suite_name=scenario["name"],
+                results=results,
+                total_duration_seconds=sum(r.duration_seconds for r in results),
+                peak_memory_gb=max(r.memory_usage_gb for r in results),
+                avg_cpu_percent=sum(r.cpu_percent for r in results) / len(results),
+                success_rate=len([r for r in results if r.success]) / len(results)
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Test suite execution failed: {str(e)}")
+            raise
+            
+    async def _run_single_test(self, test_config: Dict[str, Any]) -> TestResult:
         """Run a single test."""
-        with TestContext(self.environment).session() as context:
-            try:
-                # Handle different test types
-                if test_config.type == TestType.CODE_GENERATION:
-                    return self._run_code_generation_test(test_config, context)
-                elif test_config.type == TestType.CODE_EXECUTION:
-                    return self._run_code_execution_test(test_config, context)
-                else:
-                    # Get test implementation
-                    test_func = registry.get_test(test_config.type, test_config.name)
-                    if not test_func:
-                        raise ValueError(
-                            f"No implementation found for test {test_config.name} "
-                            f"of type {test_config.type}"
-                        )
-                    
-                    # Add source and target info to parameters
-                    parameters = {
-                        **test_config.parameters,
-                        "source": self.config.source,
-                        "target": self.config.target,
-                        "input_path": f"{self.config.test_data_location}/{test_config.name}"
-                    }
-                    
-                    # Run test
-                    start_time = context.start_time
-                    test_func(context, test_config)
-                    
-                    # Get metrics
-                    metrics = context.monitor_resources()
-                    
-                    return TestResult(
-                        success=True,
-                        test_name=test_config.name,
-                        duration_seconds=metrics["elapsed_seconds"],
-                        memory_usage_gb=metrics["memory_gb"],
-                        cpu_percent=metrics["cpu_percent"]
-                    )
-                
-            except Exception as e:
-                self.logger.error(f"Test {test_config.name} failed: {str(e)}")
-                metrics = context.monitor_resources()
-                
-                return TestResult(
-                    success=False,
-                    test_name=test_config.name,
-                    duration_seconds=metrics["elapsed_seconds"],
-                    memory_usage_gb=metrics["memory_gb"],
-                    cpu_percent=metrics["cpu_percent"],
-                    error_message=str(e)
-                )
-    
+        try:
+            # Create test context
+            context = TestContext(self.config)
+            
+            # Run test based on type
+            if test_config["type"] == "code_generation":
+                result = await self._run_code_generation_test(test_config, context)
+            elif test_config["type"] == "code_execution":
+                result = await self._run_code_execution_test(test_config, context)
+            else:
+                raise ValueError(f"Unknown test type: {test_config['type']}")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Test {test_config['name']} failed: {str(e)}")
+            metrics = context.monitor_resources()
+            
+            return TestResult(
+                success=False,
+                test_name=test_config["name"],
+                duration_seconds=metrics["elapsed_seconds"],
+                memory_usage_gb=metrics["memory_gb"],
+                cpu_percent=metrics["cpu_percent"],
+                error_message=str(e)
+            )
+            
     async def _run_code_generation_test(
         self,
-        test_config: TestConfig,
+        test_config: Dict[str, Any],
         context: TestContext
     ) -> TestResult:
         """Run a code generation test."""
         try:
-            # Get test parameters
-            task = test_config.parameters["task"]
-            requirements = test_config.parameters["requirements"]
-            test_data = context.load_data(test_config.parameters["test_data_path"])
-            
             # Generate code
-            code_response = await self.data_engineering_agent.generate_transformation(
-                source_type=self.config.source.type,
-                source_data=test_data,
-                target_schema=test_config.parameters.get("target_schema"),
-                context={
-                    "task": task,
-                    "requirements": requirements
-                }
+            code = await self.llm_generator.generate_code(
+                task=test_config["task"],
+                context=test_config["context"],
+                requirements=test_config["requirements"],
+                constraints=test_config.get("constraints", [])
             )
             
-            # Validate code meets requirements
+            # Validate generated code
             validation_results = self._validate_generated_code(
-                code_response,
-                test_config.parameters["validation_rules"]
+                code,
+                test_config["validation_rules"]
             )
             
             # Get metrics
             metrics = context.monitor_resources()
-            metrics.update(validation_results["metrics"])
             
             return TestResult(
                 success=validation_results["success"],
-                test_name=test_config.name,
+                test_name=test_config["name"],
                 duration_seconds=metrics["elapsed_seconds"],
                 memory_usage_gb=metrics["memory_gb"],
                 cpu_percent=metrics["cpu_percent"],
-                error_message=validation_results.get("error"),
-                metrics=metrics
+                metrics=validation_results["metrics"]
             )
             
         except Exception as e:
@@ -236,31 +233,30 @@ class TestExecutor:
             
             return TestResult(
                 success=False,
-                test_name=test_config.name,
+                test_name=test_config["name"],
                 duration_seconds=metrics["elapsed_seconds"],
                 memory_usage_gb=metrics["memory_gb"],
                 cpu_percent=metrics["cpu_percent"],
                 error_message=str(e)
             )
-    
+            
     async def _run_code_execution_test(
         self,
-        test_config: TestConfig,
+        test_config: Dict[str, Any],
         context: TestContext
     ) -> TestResult:
         """Run a code execution test."""
         try:
             # Get test parameters
-            code = test_config.parameters["code"]
-            test_data = context.load_data(test_config.parameters["test_data_path"])
+            code = test_config["parameters"]["code"]
+            test_data = context.load_data(test_config["parameters"]["test_data_path"])
             
             # Create execution context
             execution_context = {
                 "test_data": test_data,
-                "pandas": pd,
-                "numpy": np,
-                "expected_functions": test_config.parameters.get("expected_functions", []),
-                "test_cases": test_config.parameters.get("test_cases", [])
+                "spark": spark,
+                "expected_functions": test_config["parameters"].get("expected_functions", []),
+                "test_cases": test_config["parameters"].get("test_cases", [])
             }
             
             # Execute code
@@ -271,7 +267,7 @@ class TestExecutor:
             
             return TestResult(
                 success=True,
-                test_name=test_config.name,
+                test_name=test_config["name"],
                 duration_seconds=metrics["elapsed_seconds"],
                 memory_usage_gb=metrics["memory_gb"],
                 cpu_percent=metrics["cpu_percent"],
@@ -284,67 +280,55 @@ class TestExecutor:
             
             return TestResult(
                 success=False,
-                test_name=test_config.name,
+                test_name=test_config["name"],
                 duration_seconds=metrics["elapsed_seconds"],
                 memory_usage_gb=metrics["memory_gb"],
                 cpu_percent=metrics["cpu_percent"],
                 error_message=str(e)
             )
-    
+            
     def _validate_generated_code(
         self,
         code_response: str,
         validation_rules: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """Validate generated code against rules."""
-        results = {
-            "success": True,
-            "metrics": {
-                "rules_passed": 0,
-                "rules_failed": 0,
-                "coverage_percent": 0
-            }
-        }
-        
         try:
-            # Parse code
-            import ast
-            tree = ast.parse(code_response)
-            
-            # Analyze code
-            analyzer = CodeAnalyzer()
-            analyzer.visit(tree)
+            results = {
+                "success": True,
+                "metrics": {
+                    "rules_passed": 0,
+                    "rules_failed": 0,
+                    "coverage_percent": 0
+                }
+            }
             
             # Check each validation rule
             for rule in validation_rules:
-                rule_type = rule["type"]
-                rule_params = rule["parameters"]
-                
-                if rule_type == "imports":
-                    if not all(imp in analyzer.imports for imp in rule_params["required"]):
-                        results["success"] = False
+                if rule["type"] == "contains":
+                    if rule["pattern"] in code_response:
+                        results["metrics"]["rules_passed"] += 1
+                    else:
                         results["metrics"]["rules_failed"] += 1
-                        continue
-                
-                elif rule_type == "functions":
-                    if not all(func in analyzer.functions for func in rule_params["required"]):
                         results["success"] = False
+                        
+                elif rule["type"] == "regex":
+                    import re
+                    if re.search(rule["pattern"], code_response):
+                        results["metrics"]["rules_passed"] += 1
+                    else:
                         results["metrics"]["rules_failed"] += 1
-                        continue
-                
-                elif rule_type == "complexity":
-                    if analyzer.complexity > rule_params["max_complexity"]:
                         results["success"] = False
+                        
+                elif rule["type"] == "function_exists":
+                    if f"def {rule['name']}" in code_response:
+                        results["metrics"]["rules_passed"] += 1
+                    else:
                         results["metrics"]["rules_failed"] += 1
-                        continue
-                
-                elif rule_type == "documentation":
-                    if analyzer.doc_coverage < rule_params["min_coverage"]:
                         results["success"] = False
-                        results["metrics"]["rules_failed"] += 1
-                        continue
-                
-                results["metrics"]["rules_passed"] += 1
+                        
+                else:
+                    raise ValueError(f"Unknown validation rule type: {rule['type']}")
             
             # Calculate coverage
             total_rules = len(validation_rules)
@@ -363,56 +347,4 @@ class TestExecutor:
                     "rules_failed": len(validation_rules),
                     "coverage_percent": 0
                 }
-            }
-
-
-class CodeAnalyzer(ast.NodeVisitor):
-    """Analyzes Python code for validation."""
-    
-    def __init__(self):
-        self.imports = set()
-        self.functions = set()
-        self.complexity = 0
-        self.doc_strings = 0
-        self.total_nodes = 0
-    
-    def visit_Import(self, node):
-        for name in node.names:
-            self.imports.add(name.name)
-        self.generic_visit(node)
-    
-    def visit_ImportFrom(self, node):
-        for name in node.names:
-            self.imports.add(f"{node.module}.{name.name}")
-        self.generic_visit(node)
-    
-    def visit_FunctionDef(self, node):
-        self.functions.add(node.name)
-        if ast.get_docstring(node):
-            self.doc_strings += 1
-        self.complexity += 1  # Basic complexity metric
-        self.generic_visit(node)
-    
-    def visit(self, node):
-        self.total_nodes += 1
-        super().visit(node)
-    
-    @property
-    def doc_coverage(self):
-        """Calculate documentation coverage."""
-        return self.doc_strings / len(self.functions) if self.functions else 0
-
-
-async def run_tests(config_file: str) -> TestReport:
-    """Run tests from configuration file."""
-    # Load configuration
-    config = GlobalTestConfig.from_json(config_file)
-    
-    # Create and run executor
-    executor = TestExecutor(config)
-    return await executor.run_tests()
-
-
-def run_tests_sync(config_file: str) -> TestReport:
-    """Synchronous version of run_tests."""
-    return asyncio.run(run_tests(config_file)) 
+            } 

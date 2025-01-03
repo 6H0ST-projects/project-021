@@ -1,15 +1,17 @@
 """
-Data analyzer agent for inspecting and understanding source data.
+Data analyzer agent for analyzing source data.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 import logging
 from pydantic import BaseModel, Field
 import json
-import pandas as pd
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import functions as F
+from pyspark.sql.types import *
 import numpy as np
-from enum import Enum
 from datetime import datetime
+import time
 
 from langchain_community.chat_models import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
@@ -18,243 +20,379 @@ from langgraph.graph import StateGraph, END
 from sidewinder.agents.base import BaseAgent, BaseAgentState
 from sidewinder.core.config import Source, SourceType
 from sidewinder.core.llm import DataEngineeringAgent, CodeGenerationRequest
+from sidewinder.core.analyzer import analyze_data
+from sidewinder.core.state import AnalyzerState
+
+# Initialize Spark session for local mode
+spark = SparkSession.builder \
+    .master("local[*]") \
+    .appName("SidewinderAnalyzer") \
+    .config("spark.driver.memory", "4g") \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+    .getOrCreate()
 
 # Setup logging
 logger = logging.getLogger(__name__)
-
-class AnalysisStep(BaseModel):
-    """A single step in the data analysis process."""
-    name: str
-    description: str
-    code: str
-    dependencies: List[str] = Field(default_factory=list)
-    results: Optional[Dict[str, Any]] = None
 
 
 class AnalyzerState(BaseAgentState):
     """State for the analyzer agent."""
     source: Source
-    analysis_steps: List[AnalysisStep] = Field(default_factory=list)
     schema: Optional[Dict[str, Any]] = None
-    sample_data: Optional[Dict[str, Any]] = None
-    data_quality_issues: list[str] = Field(default_factory=list)
-    inferred_data_types: Optional[Dict[str, str]] = None
-    statistics: Optional[Dict[str, Dict[str, Any]]] = None
+    data_quality: Optional[Dict[str, Any]] = None
+    statistics: Optional[Dict[str, Any]] = None
+    patterns: Optional[Dict[str, Any]] = None
+    anomalies: Optional[Dict[str, Any]] = None
+    execution_time: float = 0.0
 
 
 class DataAnalyzer(BaseAgent[AnalyzerState]):
-    """Agent responsible for analyzing source data and determining its characteristics."""
+    """Agent for analyzing source data."""
     
-    def __init__(self):
+    def __init__(self, code: Optional[str] = None):
+        """
+        Initialize the analyzer agent.
+        
+        Args:
+            code: LLM-generated code for custom analysis
+        """
         super().__init__()
+        self.code = code
         self.llm_agent = DataEngineeringAgent()
-    
+        
     async def run(self, state: AnalyzerState) -> AnalyzerState:
         """
-        Analyze the source data to determine:
-        1. Data schema and types
-        2. Data quality issues
-        3. Sample data for validation
+        Run data analysis:
+        1. Analyze schema
+        2. Check data quality
+        3. Generate statistics
+        4. Detect patterns
+        5. Detect anomalies
         
         Args:
             state: Current analyzer state
             
         Returns:
-            Updated analyzer state with data insights
+            Updated analyzer state with analysis results
         """
         try:
-            # Create analysis workflow
-            workflow = StateGraph(AnalyzerState)
+            logger.info("Starting data analysis...")
+            start_time = time.time()
             
-            # Add nodes for each analysis step
-            workflow.add_node("connect", self._connect_to_source)
-            workflow.add_node("sample", self._extract_sample)
-            workflow.add_node("analyze", self._analyze_data)
-            workflow.add_node("validate", self._validate_results)
+            # Initialize state fields
+            state.schema = {"fields": [], "metadata": {}}
+            state.data_quality = {"metrics": {}, "issues": []}
+            state.statistics = {"summary": {}, "distributions": {}}
+            state.patterns = {"discovered": [], "analysis": {}}
+            state.anomalies = {"detected": [], "details": {}}
             
-            # Add edges
-            workflow.add_edge("connect", "sample")
-            workflow.add_edge("sample", "analyze")
-            workflow.add_edge("analyze", "validate")
-            
-            # Set entry point
-            workflow.set_entry_point("connect")
-            
-            # Set end point conditions
-            workflow.add_edge("validate", END)
-            
-            # Execute workflow
-            state = await workflow.arun(state)
-            
-            state.completed = True
-            return state
-            
-        except Exception as e:
-            logger.error(f"Analysis failed: {str(e)}")
-            state.error = str(e)
-            return state
-    
-    async def _connect_to_source(self, state: AnalyzerState) -> AnalyzerState:
-        """Connect to data source and validate access."""
-        try:
-            # Generate connection code using LLM
-            connection_code = await self.llm_agent.analyze_data_source(
-                source_type=state.source.type,
-                sample_data=None,
-                context={
-                    "source_config": state.source.dict(),
-                    "purpose": "establish connection and validate access"
-                }
-            )
-            
-            # Add connection step
-            state.analysis_steps.append(
-                AnalysisStep(
-                    name="connect_to_source",
-                    description="Establish connection to the data source",
-                    code=connection_code
-                )
-            )
-            
-            # Execute connection code
-            exec_globals = {}
-            exec(connection_code, exec_globals)
-            connect_func = exec_globals.get("connect_to_source")
-            
-            if connect_func:
-                state.connection = connect_func(state.source)
-            
-            return state
-            
-        except Exception as e:
-            logger.error(f"Connection failed: {str(e)}")
-            raise
-    
-    async def _extract_sample(self, state: AnalyzerState) -> AnalyzerState:
-        """Extract representative data sample."""
-        try:
-            # Generate sampling code using LLM
-            sampling_code = await self.llm_agent.analyze_data_source(
-                source_type=state.source.type,
-                sample_data=state.connection,
-                context={
-                    "source_config": state.source.dict(),
-                    "purpose": "extract representative data sample"
-                }
-            )
-            
-            # Add sampling step
-            state.analysis_steps.append(
-                AnalysisStep(
-                    name="extract_sample",
-                    description="Extract a representative data sample",
-                    code=sampling_code,
-                    dependencies=["connect_to_source"]
-                )
-            )
-            
-            # Execute sampling code
-            exec_globals = {"source_data": state.connection}
-            exec(sampling_code, exec_globals)
-            sample_func = exec_globals.get("extract_sample")
-            
-            if sample_func:
-                state.sample_data = sample_func(state.connection)
-            
-            return state
-            
-        except Exception as e:
-            logger.error(f"Sampling failed: {str(e)}")
-            raise
-    
-    async def _analyze_data(self, state: AnalyzerState) -> AnalyzerState:
-        """Perform comprehensive data analysis."""
-        try:
-            # Generate analysis code using LLM
-            analysis_code = await self.llm_agent.analyze_data_source(
-                source_type=state.source.type,
-                sample_data=state.sample_data,
-                context={
-                    "source_config": state.source.dict(),
-                    "purpose": "comprehensive data analysis"
-                }
-            )
-            
-            # Add analysis step
-            state.analysis_steps.append(
-                AnalysisStep(
-                    name="analyze_data",
-                    description="Perform comprehensive data analysis",
-                    code=analysis_code,
-                    dependencies=["extract_sample"]
-                )
-            )
+            # Convert input data to Spark DataFrame if needed
+            if isinstance(state.source.sample_data, str):
+                sample_data = spark.read.json(state.source.sample_data)
+            else:
+                sample_data = spark.createDataFrame(state.source.sample_data)
             
             # Execute analysis code
-            exec_globals = {"sample_data": state.sample_data}
-            exec(analysis_code, exec_globals)
-            analyze_func = exec_globals.get("analyze_data")
+            exec(self.code, globals(), locals())
             
-            if analyze_func:
-                analysis_results = analyze_func(state.sample_data)
-                state.schema = analysis_results.get("schema")
-                state.data_quality_issues = analysis_results.get("quality_issues", [])
-                state.inferred_data_types = analysis_results.get("data_types")
-                state.statistics = analysis_results.get("statistics")
+            # Update state with results
+            if "analyze_data" in locals():
+                results = locals()["analyze_data"](sample_data)
+                if isinstance(results, dict):
+                    if "schema" in results:
+                        state.schema.update(results["schema"])
+                    if "data_quality" in results:
+                        state.data_quality.update(results["data_quality"])
+                    if "statistics" in results:
+                        state.statistics.update(results["statistics"])
+                    if "patterns" in results:
+                        state.patterns.update(results["patterns"])
+                    if "anomalies" in results:
+                        state.anomalies.update(results["anomalies"])
             
-            return state
+            state.completed = True
+            state.messages.append("Analysis completed successfully")
             
         except Exception as e:
-            logger.error(f"Analysis failed: {str(e)}")
-            raise
-    
-    async def _validate_results(self, state: AnalyzerState) -> AnalyzerState:
-        """Validate analysis results and generate summary."""
+            state.error = str(e)
+            state.messages.append(f"Analysis failed: {str(e)}")
+            
+        finally:
+            state.execution_time = time.time() - start_time
+            
+        return state
+
+    async def _analyze_schema(self, state: AnalyzerState) -> Dict[str, Any]:
+        """Analyze the schema of the source data."""
         try:
-            # Generate validation code using LLM
-            validation_code = await self.llm_agent.analyze_data_source(
-                source_type=state.source.type,
-                sample_data=state.sample_data,
-                context={
-                    "source_config": state.source.dict(),
-                    "analysis_results": {
+            if self.code:
+                # Use LLM-generated code for schema analysis
+                request = CodeGenerationRequest(
+                    task="Analyze data schema using Spark SQL",
+                    context={
+                        "source_type": state.source.type,
+                        "source_location": state.source.location,
+                        "source_config": state.source.config
+                    },
+                    requirements=[
+                        "Use Spark SQL to analyze schema",
+                        "Detect data types",
+                        "Identify primary keys",
+                        "Find relationships",
+                        "Infer schema structure"
+                    ],
+                    constraints=[
+                        "Handle large datasets efficiently",
+                        "Use Spark SQL operations",
+                        "Preserve data types"
+                    ]
+                )
+                response = await self.llm_agent.generate_code(request)
+                # Execute generated code
+                exec(response.code, globals(), locals())
+                state.schema = locals().get("schema", {})
+            else:
+                # Use default schema analysis with Spark SQL
+                data = spark.createDataFrame(state.source.sample_data)
+                state.schema = {
+                    "fields": [
+                        {
+                            "name": field.name,
+                            "type": str(field.dataType),
+                            "nullable": field.nullable
+                        }
+                        for field in data.schema.fields
+                    ],
+                    "metadata": {
+                        "total_fields": len(data.schema.fields),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                }
+            
+            # Ensure all required fields are written
+            state.messages = state.messages or []
+            state.error = None
+            state.completed = True
+            state.source = state.source
+            state.schema = state.schema or {}
+            state.data_quality = state.data_quality or {}
+            state.statistics = state.statistics or {}
+            state.patterns = state.patterns or {}
+            state.anomalies = state.anomalies or {}
+            state.execution_time = 0.0
+            
+            state.messages.append("Schema analysis completed")
+            return {"state": state}
+        except Exception as e:
+            state.error = str(e)
+            state.messages.append(f"Schema analysis failed: {str(e)}")
+            return {"state": state}
+
+    async def _check_data_quality(self, state: AnalyzerState) -> Dict[str, Any]:
+        """Check data quality metrics."""
+        try:
+            if self.code:
+                # Use LLM-generated code for quality checks
+                request = CodeGenerationRequest(
+                    task="Check data quality",
+                    context={
+                        "source_type": state.source.type,
+                        "schema": state.schema
+                    },
+                    requirements=[
+                        "Check completeness",
+                        "Validate formats",
+                        "Find duplicates",
+                        "Measure consistency"
+                    ],
+                    constraints=[
+                        "Handle large datasets",
+                        "Memory efficient",
+                        "Comprehensive checks"
+                    ]
+                )
+                response = await self.llm_agent.generate_code(request)
+                # Execute generated code
+                exec(response.code, globals(), locals())
+                state.data_quality = locals().get("data_quality", {})
+            else:
+                # Use default quality checks
+                data = analyze_data(state.source)
+                state.data_quality = data.get("quality", {})
+            
+            # Ensure all required fields are written
+            state.messages = state.messages or []
+            state.error = None
+            state.completed = True
+            state.source = state.source
+            state.schema = state.schema or {}
+            state.data_quality = state.data_quality or {}
+            state.statistics = state.statistics or {}
+            state.patterns = state.patterns or {}
+            state.anomalies = state.anomalies or {}
+            state.execution_time = 0.0
+            
+            state.messages.append("Data quality check completed")
+            return {"state": state}
+        except Exception as e:
+            state.error = str(e)
+            state.messages.append(f"Data quality check failed: {str(e)}")
+            return {"state": state}
+
+    async def _generate_statistics(self, state: AnalyzerState) -> Dict[str, Any]:
+        """Generate statistical summaries."""
+        try:
+            if self.code:
+                # Use LLM-generated code for statistics
+                request = CodeGenerationRequest(
+                    task="Generate statistics",
+                    context={
+                        "source_type": state.source.type,
                         "schema": state.schema,
-                        "quality_issues": state.data_quality_issues,
-                        "data_types": state.inferred_data_types,
+                        "quality": state.data_quality
+                    },
+                    requirements=[
+                        "Calculate distributions",
+                        "Find correlations",
+                        "Identify outliers",
+                        "Generate summaries"
+                    ],
+                    constraints=[
+                        "Handle large datasets",
+                        "Memory efficient",
+                        "Statistical accuracy"
+                    ]
+                )
+                response = await self.llm_agent.generate_code(request)
+                # Execute generated code
+                exec(response.code, globals(), locals())
+                state.statistics = locals().get("statistics", {})
+            else:
+                # Use default statistics generation
+                data = analyze_data(state.source)
+                state.statistics = data.get("statistics", {})
+            
+            # Ensure all required fields are written
+            state.messages = state.messages or []
+            state.error = None
+            state.completed = True
+            state.source = state.source
+            state.schema = state.schema or {}
+            state.data_quality = state.data_quality or {}
+            state.statistics = state.statistics or {}
+            state.patterns = state.patterns or {}
+            state.anomalies = state.anomalies or {}
+            state.execution_time = 0.0
+            
+            state.messages.append("Statistics generation completed")
+            return {"state": state}
+        except Exception as e:
+            state.error = str(e)
+            state.messages.append(f"Statistics generation failed: {str(e)}")
+            return {"state": state}
+
+    async def _detect_patterns(self, state: AnalyzerState) -> Dict[str, Any]:
+        """Detect patterns in the data."""
+        try:
+            if self.code:
+                # Use LLM-generated code for pattern detection
+                request = CodeGenerationRequest(
+                    task="Detect patterns",
+                    context={
+                        "source_type": state.source.type,
+                        "schema": state.schema,
                         "statistics": state.statistics
                     },
-                    "purpose": "validate analysis results"
-                }
-            )
-            
-            # Add validation step
-            state.analysis_steps.append(
-                AnalysisStep(
-                    name="validate_results",
-                    description="Validate analysis results and generate summary",
-                    code=validation_code,
-                    dependencies=["analyze_data"]
+                    requirements=[
+                        "Find trends",
+                        "Detect seasonality",
+                        "Identify cycles",
+                        "Discover relationships"
+                    ],
+                    constraints=[
+                        "Handle large datasets",
+                        "Memory efficient",
+                        "Pattern significance"
+                    ]
                 )
-            )
+                response = await self.llm_agent.generate_code(request)
+                # Execute generated code
+                exec(response.code, globals(), locals())
+                state.patterns = locals().get("patterns", {})
+            else:
+                # Use default pattern detection
+                data = analyze_data(state.source)
+                state.patterns = data.get("patterns", {})
             
-            # Execute validation code
-            exec_globals = {
-                "analysis_results": {
-                    "schema": state.schema,
-                    "quality_issues": state.data_quality_issues,
-                    "data_types": state.inferred_data_types,
-                    "statistics": state.statistics
-                }
-            }
-            exec(validation_code, exec_globals)
-            validate_func = exec_globals.get("validate_results")
+            # Ensure all required fields are written
+            state.messages = state.messages or []
+            state.error = None
+            state.completed = True
+            state.source = state.source
+            state.schema = state.schema or {}
+            state.data_quality = state.data_quality or {}
+            state.statistics = state.statistics or {}
+            state.patterns = state.patterns or {}
+            state.anomalies = state.anomalies or {}
+            state.execution_time = 0.0
             
-            if validate_func:
-                validation_results = validate_func(exec_globals["analysis_results"])
-                state.validation = validation_results
-            
-            return state
-            
+            state.messages.append("Pattern detection completed")
+            return {"state": state}
         except Exception as e:
-            logger.error(f"Validation failed: {str(e)}")
-            raise 
+            state.error = str(e)
+            state.messages.append(f"Pattern detection failed: {str(e)}")
+            return {"state": state}
+
+    async def _detect_anomalies(self, state: AnalyzerState) -> Dict[str, Any]:
+        """Detect anomalies in the data."""
+        try:
+            if self.code:
+                # Use LLM-generated code for anomaly detection
+                request = CodeGenerationRequest(
+                    task="Detect anomalies",
+                    context={
+                        "source_type": state.source.type,
+                        "schema": state.schema,
+                        "statistics": state.statistics,
+                        "patterns": state.patterns
+                    },
+                    requirements=[
+                        "Find outliers",
+                        "Detect inconsistencies",
+                        "Identify errors",
+                        "Flag anomalies"
+                    ],
+                    constraints=[
+                        "Handle large datasets",
+                        "Memory efficient",
+                        "Anomaly significance"
+                    ]
+                )
+                response = await self.llm_agent.generate_code(request)
+                # Execute generated code
+                exec(response.code, globals(), locals())
+                state.anomalies = locals().get("anomalies", {})
+            else:
+                # Use default anomaly detection
+                data = analyze_data(state.source)
+                state.anomalies = data.get("anomalies", {})
+            
+            # Ensure all required fields are written
+            state.messages = state.messages or []
+            state.error = None
+            state.completed = True
+            state.source = state.source
+            state.schema = state.schema or {}
+            state.data_quality = state.data_quality or {}
+            state.statistics = state.statistics or {}
+            state.patterns = state.patterns or {}
+            state.anomalies = state.anomalies or {}
+            state.execution_time = 0.0
+            
+            state.messages.append("Anomaly detection completed")
+            return {"state": state}
+        except Exception as e:
+            state.error = str(e)
+            state.messages.append(f"Anomaly detection failed: {str(e)}")
+            return {"state": state} 

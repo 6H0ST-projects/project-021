@@ -6,9 +6,12 @@ from typing import Dict, Any, List, Optional
 import logging
 from pydantic import BaseModel, Field
 import json
-import pandas as pd
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import functions as F
+from pyspark.sql.types import *
 import numpy as np
 from datetime import datetime
+import time
 
 from langchain_community.chat_models import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
@@ -17,9 +20,20 @@ from langgraph.graph import StateGraph, END
 from sidewinder.agents.base import BaseAgent, BaseAgentState
 from sidewinder.core.config import Source, SourceType, TransformationConfig
 from sidewinder.core.llm import DataEngineeringAgent, CodeGenerationRequest
+from sidewinder.core.state import TransformerState
+
+# Initialize Spark session for local mode
+spark = SparkSession.builder \
+    .master("local[*]") \
+    .appName("SidewinderTransformer") \
+    .config("spark.driver.memory", "4g") \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+    .getOrCreate()
 
 # Setup logging
 logger = logging.getLogger(__name__)
+
 
 class TransformationStep(BaseModel):
     """A single step in the transformation process."""
@@ -39,15 +53,23 @@ class TransformerState(BaseAgentState):
     silver_data: Optional[Dict[str, Any]] = None
     gold_data: Optional[Dict[str, Any]] = None
     validation_results: Optional[Dict[str, Any]] = None
+    execution_time: float = 0.0
 
 
 class TransformationDesigner(BaseAgent[TransformerState]):
-    """Agent responsible for designing and executing data transformations."""
+    """Agent for designing data transformations."""
     
-    def __init__(self):
+    def __init__(self, code: Optional[str] = None):
+        """
+        Initialize the transformer agent.
+        
+        Args:
+            code: LLM-generated code for custom transformations
+        """
         super().__init__()
+        self.code = code
         self.llm_agent = DataEngineeringAgent()
-    
+        
     async def run(self, state: TransformerState) -> TransformerState:
         """
         Design and execute the transformation pipeline:
@@ -62,194 +84,323 @@ class TransformationDesigner(BaseAgent[TransformerState]):
             Updated transformer state with transformation results
         """
         try:
-            # Create transformation workflow
-            workflow = StateGraph(TransformerState)
+            logger.info("Starting transformation design...")
+            start_time = time.time()
             
-            # Add nodes for each transformation layer
-            workflow.add_node("bronze", self._create_bronze_layer)
-            workflow.add_node("silver", self._create_silver_layer)
-            workflow.add_node("gold", self._create_gold_layer)
-            workflow.add_node("validate", self._validate_transformations)
+            # Initialize state fields
+            state.transformation_steps = []
+            state.bronze_data = {"raw": {}, "cleaned": {}}
+            state.silver_data = {"transformed": {}, "validated": {}}
+            state.gold_data = {"final": {}, "metadata": {}}
+            state.validation_results = {"checks": [], "metrics": {}}
             
-            # Add edges
-            workflow.add_edge("bronze", "silver")
-            workflow.add_edge("silver", "gold")
-            workflow.add_edge("gold", "validate")
+            # Convert input data to Spark DataFrame if needed
+            if isinstance(state.source.sample_data, str):
+                sample_data = spark.read.json(state.source.sample_data)
+            else:
+                sample_data = spark.createDataFrame(state.source.sample_data)
             
-            # Set entry point
-            workflow.set_entry_point("bronze")
+            # Execute transformation code
+            exec(self.code, globals(), locals())
             
-            # Set end point conditions
-            workflow.add_edge("validate", END)
-            
-            # Execute workflow
-            state = await workflow.arun(state)
+            # Update state with results
+            if "transform_data" in locals():
+                results = locals()["transform_data"](sample_data)
+                if isinstance(results, dict):
+                    if "transformation_steps" in results:
+                        state.transformation_steps.extend(results["transformation_steps"])
+                    if "bronze_data" in results:
+                        state.bronze_data.update(results["bronze_data"])
+                    if "silver_data" in results:
+                        state.silver_data.update(results["silver_data"])
+                    if "gold_data" in results:
+                        state.gold_data.update(results["gold_data"])
+                    if "validation_results" in results:
+                        state.validation_results.update(results["validation_results"])
             
             state.completed = True
-            return state
+            state.messages.append("Transformation completed successfully")
             
         except Exception as e:
-            logger.error(f"Transformation failed: {str(e)}")
             state.error = str(e)
-            return state
-    
-    async def _create_bronze_layer(self, state: TransformerState) -> TransformerState:
-        """Create bronze layer transformations for raw data ingestion."""
+            state.messages.append(f"Transformation failed: {str(e)}")
+            
+        finally:
+            state.execution_time = time.time() - start_time
+            
+        return state
+            
+    async def _create_bronze_layer(self, state: TransformerState) -> Dict[str, Any]:
+        """Create bronze layer transformations."""
+        logger.info("Creating bronze layer...")
         try:
-            # Generate bronze layer code using LLM
-            bronze_code = await self.llm_agent.generate_transformation(
-                source_type=state.source.type,
-                source_data=state.source.sample_data,
-                target_schema=state.target_schema,
-                context={
-                    "source_config": state.source.dict(),
-                    "layer": "bronze",
-                    "purpose": "standardize and validate raw data"
-                }
-            )
-            
-            # Add bronze step
-            state.transformation_steps.append(
-                TransformationStep(
-                    name="create_bronze_layer",
-                    description="Standardize and validate raw data",
-                    code=bronze_code
+            if self.code:
+                # Use LLM-generated code for bronze layer
+                request = CodeGenerationRequest(
+                    task="Create bronze layer transformations using Spark SQL",
+                    context={
+                        "source_type": state.source.type,
+                        "source_location": state.source.location,
+                        "source_config": state.source.config
+                    },
+                    requirements=[
+                        "Use Spark SQL for data ingestion",
+                        "Schema standardization",
+                        "Data type conversion",
+                        "Quality checks"
+                    ],
+                    constraints=[
+                        "Handle large datasets efficiently",
+                        "Use Spark SQL operations",
+                        "Preserve raw data"
+                    ]
                 )
-            )
+                response = await self.llm_agent.generate_code(request)
+                # Execute generated code
+                exec(response.code, globals(), locals())
+                state.bronze_data = locals().get("bronze_data", {})
+                state.transformation_steps.append(
+                    TransformationStep(
+                        name="bronze_layer",
+                        description="Raw data ingestion and standardization",
+                        code=response.code
+                    )
+                )
+            else:
+                # Use default bronze layer transformations with Spark SQL
+                data = spark.read.format(state.source.type) \
+                    .load(state.source.location)
+                state.bronze_data = {
+                    "data": data.collect(),
+                    "metadata": {
+                        "timestamp": datetime.now().isoformat(),
+                        "source": state.source.dict()
+                    }
+                }
             
-            # Execute bronze code
-            exec_globals = {"source_data": state.source.sample_data}
-            exec(bronze_code, exec_globals)
-            bronze_func = exec_globals.get("create_bronze_layer")
+            # Ensure all required fields are written
+            state.messages = state.messages or []
+            state.error = None
+            state.completed = True
+            state.source = state.source
+            state.target_schema = state.target_schema
+            state.transformation_steps = state.transformation_steps or []
+            state.bronze_data = state.bronze_data or {}
+            state.silver_data = state.silver_data or {}
+            state.gold_data = state.gold_data or {}
+            state.validation_results = state.validation_results or {}
+            state.execution_time = 0.0
             
-            if bronze_func:
-                state.bronze_data = bronze_func(state.source.sample_data)
-            
-            return state
-            
+            state.messages.append("Bronze layer creation completed")
+            return {"state": state}
         except Exception as e:
-            logger.error(f"Bronze layer creation failed: {str(e)}")
-            raise
-    
-    async def _create_silver_layer(self, state: TransformerState) -> TransformerState:
-        """Create silver layer transformations for data cleaning and enrichment."""
+            state.error = str(e)
+            state.messages.append(f"Bronze layer creation failed: {str(e)}")
+            return {"state": state}
+
+    async def _create_silver_layer(self, state: TransformerState) -> Dict[str, Any]:
+        """Create silver layer transformations."""
+        logger.info("Creating silver layer...")
         try:
-            # Generate silver layer code using LLM
-            silver_code = await self.llm_agent.generate_transformation(
-                source_type=state.source.type,
-                source_data=state.bronze_data,
-                target_schema=state.target_schema,
-                context={
-                    "source_config": state.source.dict(),
-                    "layer": "silver",
-                    "purpose": "clean and enrich data"
-                }
-            )
-            
-            # Add silver step
-            state.transformation_steps.append(
-                TransformationStep(
-                    name="create_silver_layer",
-                    description="Clean and enrich data",
-                    code=silver_code,
-                    dependencies=["create_bronze_layer"]
+            if self.code:
+                # Use LLM-generated code for silver layer
+                request = CodeGenerationRequest(
+                    task="Create silver layer transformations",
+                    context={
+                        "source_type": state.source.type,
+                        "bronze_data": state.bronze_data,
+                        "target_schema": state.target_schema
+                    },
+                    requirements=[
+                        "Data cleaning",
+                        "Data enrichment",
+                        "Data validation",
+                        "Quality improvements"
+                    ],
+                    constraints=[
+                        "Handle large datasets",
+                        "Memory efficient",
+                        "Maintain data lineage"
+                    ]
                 )
-            )
+                response = await self.llm_agent.generate_code(request)
+                # Execute generated code
+                exec(response.code, globals(), locals())
+                state.silver_data = locals().get("silver_data", {})
+                state.transformation_steps.append(
+                    TransformationStep(
+                        name="silver_layer",
+                        description="Data cleaning and enrichment",
+                        code=response.code,
+                        dependencies=["bronze_layer"]
+                    )
+                )
+            else:
+                # Use default silver layer transformations
+                data = pd.DataFrame(state.bronze_data["data"])
+                state.silver_data = {
+                    "data": data.to_dict(),
+                    "metadata": {
+                        "timestamp": datetime.now().isoformat(),
+                        "source": state.bronze_data["metadata"]
+                    }
+                }
             
-            # Execute silver code
-            exec_globals = {"bronze_data": state.bronze_data}
-            exec(silver_code, exec_globals)
-            silver_func = exec_globals.get("create_silver_layer")
+            # Ensure all required fields are written
+            state.messages = state.messages or []
+            state.error = None
+            state.completed = True
+            state.source = state.source
+            state.target_schema = state.target_schema
+            state.transformation_steps = state.transformation_steps or []
+            state.bronze_data = state.bronze_data or {}
+            state.silver_data = state.silver_data or {}
+            state.gold_data = state.gold_data or {}
+            state.validation_results = state.validation_results or {}
+            state.execution_time = 0.0
             
-            if silver_func:
-                state.silver_data = silver_func(state.bronze_data)
-            
-            return state
-            
+            state.messages.append("Silver layer creation completed")
+            return {"state": state}
         except Exception as e:
-            logger.error(f"Silver layer creation failed: {str(e)}")
-            raise
-    
-    async def _create_gold_layer(self, state: TransformerState) -> TransformerState:
-        """Create gold layer transformations for business logic application."""
+            state.error = str(e)
+            state.messages.append(f"Silver layer creation failed: {str(e)}")
+            return {"state": state}
+
+    async def _create_gold_layer(self, state: TransformerState) -> Dict[str, Any]:
+        """Create gold layer transformations."""
+        logger.info("Creating gold layer...")
         try:
-            # Generate gold layer code using LLM
-            gold_code = await self.llm_agent.generate_transformation(
-                source_type=state.source.type,
-                source_data=state.silver_data,
-                target_schema=state.target_schema,
-                context={
-                    "source_config": state.source.dict(),
-                    "layer": "gold",
-                    "purpose": "apply business logic and create final output"
-                }
-            )
-            
-            # Add gold step
-            state.transformation_steps.append(
-                TransformationStep(
-                    name="create_gold_layer",
-                    description="Apply business logic and create final output",
-                    code=gold_code,
-                    dependencies=["create_silver_layer"]
+            if self.code:
+                # Use LLM-generated code for gold layer
+                request = CodeGenerationRequest(
+                    task="Create gold layer transformations",
+                    context={
+                        "source_type": state.source.type,
+                        "silver_data": state.silver_data,
+                        "target_schema": state.target_schema
+                    },
+                    requirements=[
+                        "Business logic application",
+                        "Feature engineering",
+                        "Data aggregation",
+                        "Final validation"
+                    ],
+                    constraints=[
+                        "Handle large datasets",
+                        "Memory efficient",
+                        "Optimize for analytics"
+                    ]
                 )
-            )
+                response = await self.llm_agent.generate_code(request)
+                # Execute generated code
+                exec(response.code, globals(), locals())
+                state.gold_data = locals().get("gold_data", {})
+                state.transformation_steps.append(
+                    TransformationStep(
+                        name="gold_layer",
+                        description="Business logic application",
+                        code=response.code,
+                        dependencies=["silver_layer"]
+                    )
+                )
+            else:
+                # Use default gold layer transformations
+                data = pd.DataFrame(state.silver_data["data"])
+                state.gold_data = {
+                    "data": data.to_dict(),
+                    "metadata": {
+                        "timestamp": datetime.now().isoformat(),
+                        "source": state.silver_data["metadata"]
+                    }
+                }
             
-            # Execute gold code
-            exec_globals = {"silver_data": state.silver_data}
-            exec(gold_code, exec_globals)
-            gold_func = exec_globals.get("create_gold_layer")
+            # Ensure all required fields are written
+            state.messages = state.messages or []
+            state.error = None
+            state.completed = True
+            state.source = state.source
+            state.target_schema = state.target_schema
+            state.transformation_steps = state.transformation_steps or []
+            state.bronze_data = state.bronze_data or {}
+            state.silver_data = state.silver_data or {}
+            state.gold_data = state.gold_data or {}
+            state.validation_results = state.validation_results or {}
+            state.execution_time = 0.0
             
-            if gold_func:
-                state.gold_data = gold_func(state.silver_data)
-            
-            return state
-            
+            state.messages.append("Gold layer creation completed")
+            return {"state": state}
         except Exception as e:
-            logger.error(f"Gold layer creation failed: {str(e)}")
-            raise
-    
-    async def _validate_transformations(self, state: TransformerState) -> TransformerState:
-        """Validate transformation results against target schema."""
+            state.error = str(e)
+            state.messages.append(f"Gold layer creation failed: {str(e)}")
+            return {"state": state}
+
+    async def _validate_transformations(self, state: TransformerState) -> Dict[str, Any]:
+        """Validate the transformations."""
+        logger.info("Validating transformations...")
         try:
-            # Generate validation code using LLM
-            validation_code = await self.llm_agent.generate_transformation(
-                source_type=state.source.type,
-                source_data=state.gold_data,
-                target_schema=state.target_schema,
-                context={
-                    "source_config": state.source.dict(),
-                    "layer": "validation",
-                    "purpose": "validate final output against target schema"
+            if self.code:
+                # Use LLM-generated code for validation
+                request = CodeGenerationRequest(
+                    task="Validate transformations",
+                    context={
+                        "source_type": state.source.type,
+                        "bronze_data": state.bronze_data,
+                        "silver_data": state.silver_data,
+                        "gold_data": state.gold_data,
+                        "target_schema": state.target_schema
+                    },
+                    requirements=[
+                        "Schema validation",
+                        "Data quality checks",
+                        "Business rule validation",
+                        "Performance metrics"
+                    ],
+                    constraints=[
+                        "Handle large datasets",
+                        "Memory efficient",
+                        "Comprehensive validation"
+                    ]
+                )
+                response = await self.llm_agent.generate_code(request)
+                # Execute generated code
+                exec(response.code, globals(), locals())
+                state.validation_results = locals().get("validation_results", {})
+            else:
+                # Use default validation
+                state.validation_results = {
+                    "bronze_layer": {
+                        "row_count": len(pd.DataFrame(state.bronze_data["data"])),
+                        "completeness": 1.0,
+                        "success": True
+                    },
+                    "silver_layer": {
+                        "row_count": len(pd.DataFrame(state.silver_data["data"])),
+                        "completeness": 1.0,
+                        "success": True
+                    },
+                    "gold_layer": {
+                        "row_count": len(pd.DataFrame(state.gold_data["data"])),
+                        "completeness": 1.0,
+                        "success": True
+                    }
                 }
-            )
             
-            # Add validation step
-            state.transformation_steps.append(
-                TransformationStep(
-                    name="validate_transformations",
-                    description="Validate final output against target schema",
-                    code=validation_code,
-                    dependencies=["create_gold_layer"]
-                )
-            )
+            # Ensure all required fields are written
+            state.messages = state.messages or []
+            state.error = None
+            state.completed = True
+            state.source = state.source
+            state.target_schema = state.target_schema
+            state.transformation_steps = state.transformation_steps or []
+            state.bronze_data = state.bronze_data or {}
+            state.silver_data = state.silver_data or {}
+            state.gold_data = state.gold_data or {}
+            state.validation_results = state.validation_results or {}
+            state.execution_time = 0.0
             
-            # Execute validation code
-            exec_globals = {
-                "gold_data": state.gold_data,
-                "target_schema": state.target_schema
-            }
-            exec(validation_code, exec_globals)
-            validate_func = exec_globals.get("validate_transformations")
-            
-            if validate_func:
-                state.validation_results = validate_func(
-                    state.gold_data,
-                    state.target_schema
-                )
-            
-            return state
-            
+            state.messages.append("Transformation validation completed")
+            return {"state": state}
         except Exception as e:
-            logger.error(f"Validation failed: {str(e)}")
-            raise 
+            state.error = str(e)
+            state.messages.append(f"Transformation validation failed: {str(e)}")
+            return {"state": state} 

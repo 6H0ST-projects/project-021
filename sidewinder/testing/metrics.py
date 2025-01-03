@@ -5,24 +5,18 @@ Performance metrics tracking for Sidewinder.
 from typing import Dict, Any, List
 import time
 import json
-from dataclasses import dataclass, asdict
+from pydantic import BaseModel, Field
 
 
-@dataclass
-class LLMMetrics:
+class LLMMetrics(BaseModel):
     """Metrics for LLM operations."""
     time: float = 0.0
     tokens: int = 0
     retries: int = 0
-    errors: List[str] = None
-    
-    def __post_init__(self):
-        if self.errors is None:
-            self.errors = []
+    errors: List[str] = Field(default_factory=list)
 
 
-@dataclass
-class ExecutionMetrics:
+class ExecutionMetrics(BaseModel):
     """Metrics for pipeline execution."""
     total_time: float = 0.0
     analyzer_time: float = 0.0
@@ -34,17 +28,17 @@ class ExecutionMetrics:
     error_count: int = 0
 
 
-class PerformanceMetrics:
+class PerformanceMetrics(BaseModel):
     """Track and aggregate performance metrics."""
-    
-    def __init__(self):
-        self.llm_metrics = {
+    llm_metrics: Dict[str, LLMMetrics] = Field(
+        default_factory=lambda: {
             "analyzer": LLMMetrics(),
             "transformer": LLMMetrics(),
             "tester": LLMMetrics()
         }
-        self.execution_metrics = ExecutionMetrics()
-        self._start_time = time.time()
+    )
+    execution_metrics: ExecutionMetrics = Field(default_factory=ExecutionMetrics)
+    start_time: float = Field(default_factory=time.time)
     
     def record_llm_metrics(self, component: str, metrics: Dict[str, Any]):
         """Record metrics for an LLM operation."""
@@ -60,7 +54,7 @@ class PerformanceMetrics:
     
     def record_execution_metrics(self, results: Dict[str, Any]):
         """Record metrics from pipeline execution."""
-        self.execution_metrics.total_time = time.time() - self._start_time
+        self.execution_metrics.total_time = time.time() - self.start_time
         
         # Extract component times from results
         if "timing" in results:
