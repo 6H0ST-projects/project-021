@@ -83,7 +83,6 @@ class Pipeline:
                     state.analyzer.error = str(e)
                     state.analyzer.messages.append(f"Analysis failed: {str(e)}")
             return {
-                "state": state,
                 "analyzer": state.analyzer,
                 "transformer": state.transformer,
                 "tester": state.tester,
@@ -102,7 +101,6 @@ class Pipeline:
                     state.transformer.error = str(e)
                     state.transformer.messages.append(f"Transformation failed: {str(e)}")
             return {
-                "state": state,
                 "analyzer": state.analyzer,
                 "transformer": state.transformer,
                 "tester": state.tester,
@@ -121,7 +119,6 @@ class Pipeline:
                     state.tester.error = str(e)
                     state.tester.messages.append(f"Testing failed: {str(e)}")
             return {
-                "state": state,
                 "analyzer": state.analyzer,
                 "transformer": state.transformer,
                 "tester": state.tester,
@@ -215,10 +212,11 @@ class Pipeline:
             # Execute the graph with initial state
             result = await self._graph.ainvoke(
                 {
-                    "state": self._state,
                     "analyzer": self._state.analyzer,
                     "transformer": self._state.transformer,
-                    "tester": self._state.tester
+                    "tester": self._state.tester,
+                    "error": None,
+                    "metrics": self._state.metrics
                 }
             )
             

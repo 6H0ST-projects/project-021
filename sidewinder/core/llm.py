@@ -107,7 +107,7 @@ class LLMCodeGenerator:
                           "IMPORTANT: Make sure to implement the exact function name as specified in the context.\n"
                           "IMPORTANT: Your code must include:\n"
                           "1. The required function with the exact name\n"
-                          "2. Use of Spark SQL for data manipulation (NO pandas)\n"
+                          "2. Use of pandas DataFrame for data manipulation\n"
                           "3. Proper function signature with type hints\n"
                           "4. Error handling with try/except\n"
                           "5. Logging for important steps\n"
@@ -122,7 +122,7 @@ class LLMCodeGenerator:
                          "3. Implement proper error handling\n"
                          "4. Add type hints\n"
                          "5. Include logging\n"
-                         "6. Use Spark SQL for all data transformations\n"
+                         "6. Use pandas for all data transformations\n"
                          "7. Follow PEP 8 style guidelines\n\n"
                          "Remember to wrap your code in ```python and ``` markers.\n"
                          "Remember to implement the exact function name as specified in the context.")
@@ -173,18 +173,17 @@ class DataEngineeringAgent:
                 task="Generate data analyzer code",
                 context={
                     "source_type": source_type,
-                    "sample_data": source_data
+                    "source_data": source_data
                 },
                 requirements=[
-                    "Implement analyze_data function that takes source_data as input",
-                    "Detect data types and schema",
-                    "Calculate data quality metrics",
-                    "Generate statistical summaries",
-                    "Detect patterns and anomalies"
+                    "Define analyze_data function that takes a source_data parameter",
+                    "Use pandas DataFrame for data processing",
+                    "Return a dictionary containing analysis results",
+                    "Include schema detection, data quality metrics, and patterns"
                 ],
                 constraints=[
-                    "Handle large datasets efficiently",
-                    "Use Spark SQL for data analysis",
+                    "Function must be named exactly 'analyze_data'",
+                    "Must use pd.DataFrame for data processing",
                     "Include proper error handling",
                     "Add logging for important steps"
                 ]
@@ -203,22 +202,21 @@ class DataEngineeringAgent:
         """Generate code for data transformation."""
         try:
             code = await self.generator.generate_code(
-                task="Generate data transformation code",
+                task="Generate data transformer code",
                 context={
                     "source_type": source_type,
-                    "sample_data": source_data,
+                    "source_data": source_data,
                     "target_schema": target_schema
                 },
                 requirements=[
-                    "Implement transform_data function that takes source_data as input",
-                    "Apply necessary data transformations using Spark SQL",
-                    "Validate against target schema if provided",
-                    "Handle data type conversions",
-                    "Implement error handling"
+                    "Define transform_data function that takes source_data parameter",
+                    "Use pandas DataFrame for data processing",
+                    "Apply transformations according to target schema",
+                    "Return transformed DataFrame"
                 ],
                 constraints=[
-                    "Handle large datasets efficiently",
-                    "Use Spark SQL for all transformations",
+                    "Function must be named exactly 'transform_data'",
+                    "Must use pd.DataFrame for data processing",
                     "Include proper error handling",
                     "Add logging for important steps"
                 ]
@@ -235,28 +233,27 @@ class DataEngineeringAgent:
         target_schema: Optional[Dict[str, Any]] = None,
         test_types: Optional[List[Dict[str, Any]]] = None
     ) -> str:
-        """Generate code for testing."""
+        """Generate code for data testing."""
         try:
             code = await self.generator.generate_code(
-                task="Generate test cases",
+                task="Generate data tester code",
                 context={
                     "source_type": source_type,
-                    "sample_data": source_data,
+                    "source_data": source_data,
                     "target_schema": target_schema,
-                    "test_types": test_types or []
+                    "test_types": test_types
                 },
                 requirements=[
-                    "Implement test_data function that takes source_data as input",
-                    "Validate data quality using Spark SQL",
-                    "Check schema compliance",
-                    "Verify transformations",
-                    "Test error handling"
+                    "Define test_data function that takes source_data parameter",
+                    "Use pandas DataFrame for data validation",
+                    "Implement all specified test types",
+                    "Return test results dictionary"
                 ],
                 constraints=[
-                    "Use pytest for testing",
-                    "Use Spark SQL for data validation",
-                    "Add performance tests",
-                    "Test error cases"
+                    "Function must be named exactly 'test_data'",
+                    "Must use pd.DataFrame for data processing",
+                    "Include proper error handling",
+                    "Add logging for important steps"
                 ]
             )
             return code
