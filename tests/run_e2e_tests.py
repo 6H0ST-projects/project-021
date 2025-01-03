@@ -10,6 +10,8 @@ from typing import Dict, Any, List
 import time
 from dotenv import load_dotenv
 import pandas as pd
+from datetime import datetime
+import webbrowser
 
 # Load environment variables from .env.local
 load_dotenv('.env.local')
@@ -20,6 +22,7 @@ from sidewinder.testing.executor import TestExecutor, GlobalTestConfig
 from sidewinder.testing.data_gen import generate_test_data
 from sidewinder.core.llm import DataEngineeringAgent, LLMCodeGenerator
 from sidewinder.testing.metrics import PerformanceMetrics
+from sidewinder.testing.reporting import TestReport, TestSuiteResult, TestResult, RequirementStatus
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -58,6 +61,7 @@ async def run_scenario(
     logger: logging.Logger
 ) -> Dict[str, Any]:
     """Run a single test scenario."""
+    start_time = datetime.now()
     try:
         # Create source and target objects
         source = Source(**scenario["source"])
@@ -117,11 +121,40 @@ async def run_scenario(
         test_executor = TestExecutor(GlobalTestConfig(**config))
         test_report = await test_executor.run_tests()
         
-        return test_report.model_dump()
+        # Create test result
+        test_result = TestResult(
+            name=scenario['name'],
+            type="e2e",
+            status="passed" if test_report.suites[0].success_rate == 1.0 else "failed",
+            duration=test_report.suites[0].total_duration_seconds,
+            error=next((r.error_message for r in test_report.suites[0].results if r.error_message), None),
+            details={"success_rate": test_report.suites[0].success_rate},
+            metrics={
+                "peak_memory_gb": test_report.suites[0].peak_memory_gb,
+                "avg_cpu_percent": test_report.suites[0].avg_cpu_percent
+            },
+            requirements=[
+                RequirementStatus(
+                    requirement=result.test_name,
+                    status="passed" if result.success else "failed",
+                    details=result.error_message if not result.success else None,
+                    code_snippet=None  # We'll need to add this if needed
+                )
+                for result in test_report.suites[0].results
+            ]
+        )
+        
+        return test_result
         
     except Exception as e:
         logger.error(f"Scenario {scenario['name']} failed: {str(e)}")
-        raise
+        return TestResult(
+            name=scenario['name'],
+            type="e2e",
+            status="failed",
+            duration=time.time() - start_time.timestamp(),
+            error=str(e)
+        )
 
 
 async def run_tests() -> None:
@@ -134,15 +167,45 @@ async def run_tests() -> None:
         logger = setup_logging(config["output_dir"])
         
         # Run scenarios
-        results = []
+        start_time = datetime.now()
+        test_results = []
         for scenario in config["scenarios"]:
             result = await run_scenario(scenario, config, logger)
-            results.append(result)
+            test_results.append(result)
+        end_time = datetime.now()
         
-        # Save results
-        output_path = Path(config["output_dir"]) / "test_results.json"
-        with open(output_path, "w") as f:
-            json.dump(results, f, indent=2)
+        # Create test suite result
+        suite_result = TestSuiteResult(
+            name="E2E Test Suite",
+            start_time=start_time,
+            end_time=end_time,
+            tests=test_results,
+            success_rate=len([t for t in test_results if t.status == "passed"]) / len(test_results),
+            total_duration=(end_time - start_time).total_seconds()
+        )
+        
+        # Generate report
+        report = TestReport(results=[suite_result])
+        output_dir = Path(config["output_dir"])
+        report.generate_html_report(str(output_dir))
+        
+        # Display results to user
+        main_report_path = output_dir / "test_report.html"
+        req_report_path = output_dir / "requirements_report.html"
+        code_report_path = output_dir / "code_report.html"
+        
+        print("\nTest execution completed!")
+        print(f"Success Rate: {suite_result.success_rate * 100:.1f}%")
+        print(f"Total Duration: {suite_result.total_duration:.2f}s")
+        print(f"\nDetailed reports have been generated:")
+        print(f"- Main Report: {main_report_path}")
+        print(f"- Requirements Report: {req_report_path}")
+        print(f"- Code Report: {code_report_path}")
+        
+        # Open reports in browser
+        webbrowser.open(f"file://{main_report_path.absolute()}")
+        webbrowser.open(f"file://{req_report_path.absolute()}")
+        webbrowser.open(f"file://{code_report_path.absolute()}")
             
     except Exception as e:
         logger.error(f"Test execution failed: {str(e)}")

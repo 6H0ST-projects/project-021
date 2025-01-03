@@ -11,4 +11,5 @@ pytest==7.4.3
 pytest-asyncio==0.21.1
 pandas==2.1.4
 langgraph==0.0.18
-faker==20.1.0 
+faker==20.1.0
+plotly==5.18.0 
